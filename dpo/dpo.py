@@ -30,28 +30,29 @@ BASE_MODEL = "gpt2" if LOW_GPU_MEM else "gpt2-medium"
 # %%
 raw_model = GPT2LMHeadModel.from_pretrained(BASE_MODEL).to(device)
 tokenizer = GPT2Tokenizer.from_pretrained(BASE_MODEL)
+d_model: int = raw_model.config.n_embd
+d_vocab: int = len(tokenizer)
+# %%
 
-class LangModel(nn.Module):
+class DPOModel(nn.Module):
     def __init__(self, model: GPT2LMHeadModel=raw_model, tokenizer: GPT2Tokenizer=tokenizer):
         super().__init__()
         self.model = model
+        self.base_model = GPT2LMHeadModel.from_pretrained(BASE_MODEL).to(device)
         self.tokenizer = tokenizer
 
-    def generate(self, prompt: str, max_new_tokens: int = 30, num_return_sequences: int = 1) -> str:
+    def generate(self, prompt: str, batch_size: int = 1, temperature: float = 1.0) -> str:
         encoded = self.tokenizer(prompt, return_tensors='pt').to(device)
-        completions: CausalLMOutputWithCrossAttentions = self.model(**encoded)
-        temp0 = completions.logits.argmax(dim=-1)
-        return self.tokenizer.decode(temp0, skip_special_tokens=True)
+        completion = self.model.generate(encoded.input_ids) #, max_new_tokens=100, temperature=temperature, num_return_sequences=batch_size)
+        # completions: CausalLMOutputWithCrossAttentions = self.model(**encoded)
+        # probs = (completions.logits[0]/temperature).softmax(dim=-1)
+        # sampled_tokens = t.multinomial(probs, num_samples=batch_size, replacement=True)
+        # # output_ids = t.cat([encoded.input_ids[0], sampled_tokens.squeeze()])
+        return self.tokenizer.decode(completion.squeeze(), skip_special_tokens=True)
 
-model = LangModel()
-# generator = pipeline('text-generation', model=BASE_MODEL, device=device)
-# set_seed(42)
-# def generate_response(prompt: str, max_new_tokens: int = 30, num_return_sequences: int = 1) -> str:
-#     completions = generator(prompt, max_length=max_new_tokens, num_return_sequences=num_return_sequences)
-#     return [completion['generated_text'] for completion in completions]
-
+dpo_model: DPOModel = DPOModel()
 # %%
 if MAIN:
-    print(model.generate("Hello, I'm a language model,"))
+    print(dpo_model.generate("What is the capital of France?"))
 
 # %%
