@@ -166,3 +166,6 @@ cython_debug/
 
 # Windows dumb stuff
 *.bak
+
+# wandb
+dpo/wandb/

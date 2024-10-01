@@ -349,13 +349,7 @@ class DPOTrainer:
             }, step=self.step)
         return loss
     
-    def train(self):
-        wandb.init(
-            project=self.args.wandb_project_name,
-            entity=self.args.wandb_entity,
-            name=f"{self.args.exp_name}__{self.args.seed}__{int(time.time())}",
-            config=self.args,
-        )
+    def _train(self):
         for batch in self.dataloader:
             self.optimizer.zero_grad()
             preferred_ids = batch["preferred"].to(device)
@@ -377,8 +371,25 @@ class DPOTrainer:
             self.scheduler.step()
             self.step += 1
 
+    def train(self):
+        if self.args.use_wandb:
+            wandb.init(
+                project=self.args.wandb_project_name,
+                entity=self.args.wandb_entity,
+                name=f"{self.args.exp_name}__{self.args.seed}__{int(time.time())}",
+                config=self.args,
+            )
+            try:
+                self._train()
+            finally:
+                wandb.finish()
+        else:
+            self._train()
+        
+
 # %%
 args.use_wandb = True
+# args.base_learning_rate = 1e-4
 trainer = DPOTrainer(dpo_model, on_the_fly_dataloader)
 trainer.train()
 # %%
