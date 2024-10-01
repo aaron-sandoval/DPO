@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Callable, Union, Sequence, Any, Literal
+from typing import Callable, Union, Sequence, Any, Literal, Optional
 
 import einops
 import numpy as np
@@ -46,8 +46,8 @@ class DPOModel(nn.Module):
         self.d_model: int = self.model.config.n_embd
         self.d_vocab: int = len(self.tokenizer)
 
-    def forward(self, input_ids: Int[Tensor, "batch seq_len"], attention_mask: Int[Tensor, "batch seq_len"], **kwargs):
-        return self.model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
+    def forward(self, input_ids: Int[Tensor, "batch seq_len"], **kwargs):
+        return self.model(input_ids=input_ids, **kwargs).logits
 
     def generate(
             self,
@@ -86,30 +86,23 @@ for ids, sample in zip(sample_ids, samples):
 
 rprint(table)
 # %%
-def reward_fn_char_count(generated_sample: str | list[str], char: str = '.') -> float | Float[Tensor, "batch"]:
-    """
-    Reward function, evaluated on the generated samples.
+# Reward and judge functions: simulating human preferences
+def reward_char_count(sample: str, char: str = '.', *args, **kwargs) -> int:
+    return sample.count(char)
 
-    In this case it's very simple: it just counts the number of instances of a particular character in
-    the generated sample. It returns a tensor of rewards of dtype float the input is a list, or a single
-    reward (float) if the input is a string.
+def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) -> Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]]:
     """
-    if isinstance( generated_sample, str):
-        return float(generated_sample.count(char))
-    else:
-        return t.tensor([float(s.count(char)) for s in generated_sample]).to(device)
-    
-# Test your reward function
-A = 'This is a test.'
-B = '......'
-C = 'Whatever'
-assert isinstance(reward_fn_char_count(A), float)
-assert reward_fn_char_count(A) == 1
-assert reward_fn_char_count(B) == 6
-assert reward_fn_char_count(C) == 0
-assert reward_fn_char_count([A, B, C]).dtype == t.float
-assert reward_fn_char_count([A, B, C]).tolist() == [1.0, 6.0, 0.0]
+    Converts a reward function to a judge function.
+    """
+    def judge_fn(samples0: Sequence[str], samples1: Sequence[str], tokenizer: PreTrainedTokenizer=tokenizer) -> Int[Tensor, "batch"]:
+        rewards0 = t.tensor([reward_fn(s, *args, tokenizer=tokenizer, **kwargs) for s in samples0], requires_grad=False)
+        rewards1 = t.tensor([reward_fn(s, *args, tokenizer=tokenizer, **kwargs) for s in samples1], requires_grad=False)
+        return rewards0 > rewards1
+    return judge_fn
 
+judge_periods = reward_to_judge(reward_char_count, char='.')
+
+assert t.all(judge_periods(["This is a test.", "This is a test.", "This is a test."], ["This is a test", "This is a test..", "This. is a test."]) == t.tensor([True, False, False]))
 # %%
 
 @dataclass
@@ -125,7 +118,7 @@ class DPOTrainingArgs():
     use_wandb: bool = False
 
     # Duration of different phases
-    train_length: int = 64*40
+    train_length: int = 64*200
     batch_size: int = 64
     # num_minibatches: int = 4
     # batches_per_learning_phase: int = 2
@@ -149,8 +142,8 @@ class DPOTrainingArgs():
     prefix: str = "This is"
 
     # Extra stuff for RLHF
-    kl_coef: float = 1.0
-    reward_fn: Callable = reward_fn_char_count
+    dpo_beta: float = 0.1
+    reward_fn: Callable = judge_periods
     normalize_reward: bool = False
 
 # %%
@@ -158,7 +151,7 @@ def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     """
     Returns an Adam optimizer for the model, with the correct learning rates for the base and head.
     """
-    return t.optim.Adam(params=model.model.parameters(), lr = args.base_learning_rate, maximize = True)
+    return t.optim.Adam(params=model.model.parameters(), lr = args.base_learning_rate)
 
 
 args = DPOTrainingArgs()
@@ -182,9 +175,37 @@ def get_lr_scheduler(warmup_steps, total_steps, final_scale):
 
 def get_optimizer_and_scheduler(args: DPOTrainingArgs, model: DPOModel):
     optimizer = get_optimizer(args, model)
-    lr_lambda = get_lr_scheduler(args.warmup_steps, args.total_phases, args.final_scale)
+    lr_lambda = get_lr_scheduler(args.warmup_steps, args.train_length//args.batch_size, args.final_scale)
     scheduler = t.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     return optimizer, scheduler
+
+# %%
+def get_correct_token_logprobs(
+    logits: Float[Tensor, "batch seq_len vocab"],
+    tokens: Int[Tensor, "batch seq_len"],
+    prefix_len: int | None = None,
+) -> Float[Tensor, "batch gen_len"]:
+    """
+    Returns correct logprobs for the given logits and tokens, for all the tokens
+    after the prefix tokens (which have length equal to `prefix_len`).
+
+    If prefix_len = None then we return shape (batch, seq_len-1). If not, then
+    we return shape (batch, seq_len-prefix_len) representing the predictions for
+    all tokens after the prefix tokens.
+    """
+    # Using no prefix_len argument is equivalent to prefix_len=1
+    prefix_len = prefix_len or 1
+
+    # Slice logprobs and tokens, so that each logprob matches up with the token which it predicts
+    logprobs = logits[:, prefix_len - 1 : -1].log_softmax(-1)
+    correct_tokens = tokens[:, prefix_len:]
+
+    # correct_logprobs[batch, seq] = logprobs[batch, seq, correct_tokens[batch, seq]]
+    # correct_logprobs = eindex(logprobs, correct_tokens, "batch seq [batch seq] -> batch seq")
+    correct_logprobs = t.gather(logprobs, -1, correct_tokens.unsqueeze(-1)).squeeze(-1)
+
+    assert correct_logprobs.shape == (tokens.shape[0], tokens.shape[1] - prefix_len)
+    return correct_logprobs
 
 # %%
 # HF Dataset
@@ -205,24 +226,7 @@ def get_optimizer_and_scheduler(args: DPOTrainingArgs, model: DPOModel):
 
 # hf_dataset = datasets.load_dataset(hf_dataset_name, split="train")
 # train_dataloader = t.utils.data.DataLoader(hf_dataset, batch_size=args.batch_size, collate_fn=collate_prompt_integrated, shuffle=True)
-# %%
-# Reward and judge functions: simulating human preferences
-def reward_char_count(sample: str, char: str = '.', *args, **kwargs) -> int:
-    return sample.count(char)
 
-def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) -> Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]]:
-    """
-    Converts a reward function to a judge function.
-    """
-    def judge_fn(samples0: Sequence[str], samples1: Sequence[str], tokenizer: PreTrainedTokenizer=tokenizer) -> Int[Tensor, "batch"]:
-        rewards0 = t.tensor([reward_fn(s, *args, tokenizer=tokenizer, **kwargs) for s in samples0], requires_grad=False)
-        rewards1 = t.tensor([reward_fn(s, *args, tokenizer=tokenizer, **kwargs) for s in samples1], requires_grad=False)
-        return rewards0 > rewards1
-    return judge_fn
-
-judge_periods = reward_to_judge(reward_char_count, char='.')
-
-assert t.all(judge_periods(["This is a test.", "This is a test.", "This is a test."], ["This is a test", "This is a test..", "This. is a test."]) == t.tensor([True, False, False]))
     
 # %%
 # On the fly dataloader
@@ -233,7 +237,6 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
             prompt: str, 
             judge_fn: Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]],
             gen_model: DPOModel = ref_model, 
-            tokenizer: PreTrainedTokenizer = tokenizer, 
             num_samples: int = args.train_length,
         ):
         """
@@ -245,13 +248,13 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
             num_samples: The number of samples to generate.
         """
         self.prompt = prompt
+        self.prefix_len = len(tokenizer(prompt)["input_ids"])
         self.judge_fn = judge_fn
         self.gen_model = gen_model
-        self.tokenizer = tokenizer
         self.num_samples = num_samples
         self.encoded_prompt = tokenizer(self.prompt, return_tensors="pt").to(device)
         self.cache_batch_size = args.batch_size
-        self.cache = [0] * self.num_samples
+        self.cache: list[tuple[Int[Tensor, "seq_len"], Int[Tensor, "seq_len"]]] = [0] * self.num_samples
 
     def __len__(self):
         return self.num_samples
@@ -260,8 +263,8 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
         if self.cache[idx] == 0:
             preferred, rejected = self.generate_preference_pairs(batch_size=self.cache_batch_size)
             cache_slice = slice(idx-idx%self.cache_batch_size, idx-idx%self.cache_batch_size+self.cache_batch_size)
-            self.cache[cache_slice] = ((self.tokenizer.decode(p), self.tokenizer.decode(r)) for p, r in zip(preferred, rejected))
-        return dict(zip(("preferred", "rejected"), self.cache[idx]))
+            self.cache[cache_slice] = zip(preferred, rejected)
+        return dict(zip(("preferred", "rejected", "prefix_len"), (*self.cache[idx], self.prefix_len)))
         
     @t.inference_mode()
     def generate_preference_pairs(
@@ -294,7 +297,6 @@ on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
     prompt=args.prefix, 
     judge_fn=judge_periods, 
     gen_model=dpo_model, 
-    tokenizer=tokenizer, 
     num_samples=args.train_length
 )
 on_the_fly_dataloader = t.utils.data.DataLoader(
@@ -304,31 +306,81 @@ on_the_fly_dataloader = t.utils.data.DataLoader(
 
 # a = on_the_fly_dataset.generate_preference_pairs(batch_size=4)
 a = next(iter(on_the_fly_dataloader))
-
+assert isinstance(a, dict)
+assert "preferred" in a and "rejected" in a and "prefix_len" in a
+assert len(a["preferred"]) == len(a["rejected"]) == len(a["prefix_len"]) == args.batch_size
+assert t.all(a["prefix_len"] == t.full((args.batch_size,), on_the_fly_dataset.prefix_len))
 # %%
-@dataclass
 class DPOTrainer:
-    model: DPOModel
-    ref_model: DPOModel = field(default_factory=lambda: DPOModel())
-    args: DPOTrainingArgs
-    optimizer: t.optim.Optimizer | None = None
-    scheduler: t.optim.lr_scheduler.LRScheduler | None = None
-
-    def __post_init__(self):
+    def __init__(
+            self, 
+            model: DPOModel, 
+            dataloader: t.utils.data.DataLoader, 
+            ref_model: Optional[DPOModel] = None,
+            args: DPOTrainingArgs = args
+        ):
+        self.model = model
+        self.dataloader = dataloader
+        self.args = args
+        if ref_model is None:
+            self.ref_model = DPOModel()
+        else:
+            self.ref_model = ref_model
         self.optimizer, self.scheduler = get_optimizer_and_scheduler(self.args, self.model)
+        self.step = 0
 
     def dpo_loss(
             self, 
-            logits: Float[Tensor, "batch"], 
-            ref_logits: Float[Tensor, "batch"],
-            
-            **kwargs
+            logprobs_pref_trained: Float[Tensor, "batch gen_len"], 
+            logprobs_rej_trained: Float[Tensor, "batch gen_len"], 
+            logprobs_pref_ref: Float[Tensor, "batch gen_len"], 
+            logprobs_rej_ref: Float[Tensor, "batch gen_len"],
         ) -> Tensor:
         """
         Computes the DPO loss for a batch of logits and rewards.
         """
-        raise NotImplementedError
+        sigmoid_arg = self.args.dpo_beta * (logprobs_pref_trained - logprobs_pref_ref - (logprobs_rej_ref - logprobs_rej_trained))
+        loss = -nn.functional.logsigmoid(sigmoid_arg).mean()
+        if self.args.use_wandb:
+            wandb.log({
+                "loss": loss,
+                "pref_relative_logprob": logprobs_pref_trained - logprobs_pref_ref,
+                "rej_relative_logprob": logprobs_rej_trained - logprobs_rej_ref,
+            }, step=self.step)
+        return loss
+    
+    def train(self):
+        wandb.init(
+            project=self.args.wandb_project_name,
+            entity=self.args.wandb_entity,
+            name=f"{self.args.exp_name}__{self.args.seed}__{int(time.time())}",
+            config=self.args,
+        )
+        for batch in self.dataloader:
+            self.optimizer.zero_grad()
+            preferred_ids = batch["preferred"].to(device)
+            rejected_ids = batch["rejected"].to(device)
+            prefix_len = batch["prefix_len"][0].item()
+            assert t.all(batch["prefix_len"] == prefix_len)
+            preferred_logits = self.model(preferred_ids)
+            rejected_logits = self.model(rejected_ids)
+            preferred_logprobs = get_correct_token_logprobs(preferred_logits, preferred_ids, prefix_len=prefix_len)
+            rejected_logprobs = get_correct_token_logprobs(rejected_logits, rejected_ids, prefix_len=prefix_len)
+            with t.inference_mode():
+                preferred_ref_logits = self.ref_model(preferred_ids)
+                rejected_ref_logits = self.ref_model(rejected_ids)
+            preferred_ref_logprobs = get_correct_token_logprobs(preferred_ref_logits, preferred_ids, prefix_len=prefix_len)
+            rejected_ref_logprobs = get_correct_token_logprobs(rejected_ref_logits, rejected_ids, prefix_len=prefix_len)
+            loss = self.dpo_loss(preferred_logprobs, rejected_logprobs, preferred_ref_logprobs, rejected_ref_logprobs)
+            loss.backward()
+            self.optimizer.step()
+            self.scheduler.step()
+            self.step += 1
 
+# %%
+args.use_wandb = True
+trainer = DPOTrainer(dpo_model, on_the_fly_dataloader)
+trainer.train()
 # %%
 if MAIN:
     print(dpo_model.generate("What is the capital of France?", batch_size=3))
