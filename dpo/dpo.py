@@ -12,7 +12,7 @@ import torch as t
 import torch.nn as nn
 import wandb
 # from eindex import eindex
-from jaxtyping import Float, Int
+from jaxtyping import Float, Int, Bool
 from rich import print as rprint
 from rich.table import Table
 from torch import Tensor
@@ -54,6 +54,7 @@ class DPOModel(nn.Module):
             batch_size: int = 1,
             gen_len: int = 20,
             temperature: float = 1.0,
+            device: t.device="cpu",
             **kwargs
         ) -> tuple[Int[Tensor, "batch_size prompt_len_plus_gen_len"], list[str]]:
         encoded = self.tokenizer(prompt, return_tensors='pt').to(device)
@@ -206,27 +207,22 @@ def get_optimizer_and_scheduler(args: DPOTrainingArgs, model: DPOModel):
 # train_dataloader = t.utils.data.DataLoader(hf_dataset, batch_size=args.batch_size, collate_fn=collate_prompt_integrated, shuffle=True)
 # %%
 # Reward and judge functions: simulating human preferences
-def reward_char_count(generated_sample: str, char: str = '.') -> float:
-    """
-    Reward function, evaluated on the generated samples.
+def reward_char_count(sample: str, char: str = '.', *args, **kwargs) -> int:
+    return sample.count(char)
 
-    In this case it's very simple: it just counts the number of instances of a particular character in
-    the generated sample. It returns a tensor of rewards of dtype float the input is a list, or a single
-    reward (float) if the input is a string.
-    """
-    if isinstance(generated_sample, str):
-        return float(generated_sample.count(char))
-    else:
-        return t.tensor([float(s.count(char)) for s in generated_sample])
-
-def reward_to_judge(reward_fn: Callable[[str], float | int]) -> Callable[[Sequence[str], Sequence[str]], Int[Tensor, "batch"]]:
+def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) -> Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]]:
     """
     Converts a reward function to a judge function.
     """
-    def judge_fn(generated_samples: Sequence[str]) -> Int[Tensor, "batch"]:
-        rewards = reward_fn(generated_samples)
-        return t.argmax(rewards, dim=0)
+    def judge_fn(samples0: Sequence[str], samples1: Sequence[str], tokenizer: PreTrainedTokenizer=tokenizer) -> Int[Tensor, "batch"]:
+        rewards0 = t.tensor([reward_fn(s, *args, tokenizer=tokenizer, **kwargs) for s in samples0], requires_grad=False)
+        rewards1 = t.tensor([reward_fn(s, *args, tokenizer=tokenizer, **kwargs) for s in samples1], requires_grad=False)
+        return rewards0 > rewards1
     return judge_fn
+
+judge_periods = reward_to_judge(reward_char_count, char='.')
+
+assert t.all(judge_periods(["This is a test.", "This is a test.", "This is a test."], ["This is a test", "This is a test..", "This. is a test."]) == t.tensor([True, False, False]))
     
 # %%
 # On the fly dataloader
@@ -235,7 +231,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
     def __init__(
             self, 
             prompt: str, 
-            judge_fn: Callable[[Sequence[str], Sequence[str]], Int[Tensor, "batch"]],
+            judge_fn: Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]],
             gen_model: DPOModel = ref_model, 
             tokenizer: PreTrainedTokenizer = tokenizer, 
             num_samples: int = args.train_length,
@@ -261,8 +257,8 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
     def __getitem__(self, idx):
         preferred, rejected = self.generate_preference_pairs(batch_size=1)
         return {
-            "preferred_column": self.tokenizer.decode(preferred[0], skip_special_tokens=True),
-            "rejected_column": self.tokenizer.decode(rejected[0], skip_special_tokens=True)
+            "preferred": self.tokenizer.decode(preferred[0], skip_special_tokens=True),
+            "rejected": self.tokenizer.decode(rejected[0], skip_special_tokens=True)
         }
         
     @t.inference_mode()
@@ -276,35 +272,39 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
         """Generate a batch of preferred and rejected completions using the reference model."""
         
         gen_tokens, gen_strings = self.gen_model.generate(
-            self.encoded_prompt,
+            self.prompt,
             max_length=max_length,
             batch_size=batch_size*2,
-            num_return_sequences=1,
-            do_sample=True,
-            temperature=temperature
+            temperature=temperature,
+            device=device
         )
-        preferred_indices = self.judge_fn(gen_strings[:batch_size], gen_strings[batch_size:], tokenizer=tokenizer)
+        preferred_index_0: Bool[Tensor, "batch"] = self.judge_fn(gen_strings[:batch_size], gen_strings[batch_size:], tokenizer=tokenizer)
+        preferred_mask: Bool[Tensor, "2 batch"] = t.stack([preferred_index_0, ~preferred_index_0], dim=0).to(device)
         # Reshape gen_tokens into (2, batch_size, seq_len)
-        gen_tokens_reshaped = einops.rearrange(gen_tokens, "(b1 b2) ... -> b1 b2 ...", b1=2)
-        
+        gen_tokens_reshaped = einops.rearrange(gen_tokens, "(b1 b2) ... -> ... b1 b2", b1=2)
         # Gather preferred and rejected completions
-        preferred_tokens = t.gather(gen_tokens_reshaped, 0, preferred_indices.unsqueeze(0).unsqueeze(-1).expand(-1, -1, gen_tokens_reshaped.size(-1)))
-        rejected_tokens = t.gather(gen_tokens_reshaped, 0, (1 - preferred_indices).unsqueeze(0).unsqueeze(-1).expand(-1, -1, gen_tokens_reshaped.size(-1)))
-        
-        # Squeeze to remove the extra dimension
-        preferred_tokens = preferred_tokens.squeeze(0)
-        rejected_tokens = rejected_tokens.squeeze(0)
+        preferred_tokens = gen_tokens_reshaped.masked_select(preferred_mask)
+        rejected_tokens = gen_tokens_reshaped.masked_select(~preferred_mask)
+        preferred_tokens = einops.rearrange(preferred_tokens, "(seq batch) -> batch seq", batch=batch_size)
+        rejected_tokens = einops.rearrange(rejected_tokens, "(seq batch) -> batch seq", batch=batch_size)
         return preferred_tokens, rejected_tokens
 
 # Create the on-the-fly dataset and dataloader
-on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(prompt=args.prefix, num_samples=args.train_length)
+on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
+    prompt=args.prefix, 
+    judge_fn=judge_periods, 
+    gen_model=dpo_model, 
+    tokenizer=tokenizer, 
+    num_samples=args.train_length
+)
 on_the_fly_dataloader = t.utils.data.DataLoader(
     on_the_fly_dataset,
     batch_size=args.batch_size,
-    collate_fn=lambda batch: collate_prompt_integrated(batch, tokenizer),
-    num_workers=4
+    # num_workers=4
 )
 
+# a = on_the_fly_dataset.generate_preference_pairs(batch_size=4)
+a = next(iter(on_the_fly_dataloader))
 
 # %%
 @dataclass
