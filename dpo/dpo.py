@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Callable, Union, Sequence, Any
+from typing import Callable, Union, Sequence, Any, Literal
 
 import einops
 import numpy as np
@@ -29,17 +29,24 @@ LOW_GPU_MEM = False
 BASE_MODEL = "gpt2" if LOW_GPU_MEM else "gpt2-medium"
 
 # %%
-raw_model = GPT2LMHeadModel.from_pretrained(BASE_MODEL).to(device)
 tokenizer = GPT2Tokenizer.from_pretrained(BASE_MODEL)
-d_model: int = raw_model.config.n_embd
-d_vocab: int = len(tokenizer)
+
 # %%
 
 class DPOModel(nn.Module):
-    def __init__(self, model: GPT2LMHeadModel=raw_model, tokenizer: GPT2Tokenizer=tokenizer):
+    def __init__(
+            self, 
+            model: GPT2LMHeadModel=GPT2LMHeadModel.from_pretrained(BASE_MODEL).to(device), 
+            tokenizer: GPT2Tokenizer=tokenizer
+        ):
         super().__init__()
         self.model = model
         self.tokenizer = tokenizer
+        self.d_model: int = self.model.config.n_embd
+        self.d_vocab: int = len(self.tokenizer)
+
+    def forward(self, input_ids: Int[Tensor, "batch seq_len"], attention_mask: Int[Tensor, "batch seq_len"], **kwargs):
+        return self.model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
 
     def generate(
             self,
@@ -48,7 +55,7 @@ class DPOModel(nn.Module):
             gen_len: int = 20,
             temperature: float = 1.0,
             **kwargs
-        ) -> tuple[Int[Tensor, "batch_size gen_len"], list[str]]:
+        ) -> tuple[Int[Tensor, "batch_size prompt_len_plus_gen_len"], list[str]]:
         encoded = self.tokenizer(prompt, return_tensors='pt').to(device)
         completion = self.model.generate(
             encoded.input_ids,
@@ -61,6 +68,7 @@ class DPOModel(nn.Module):
         return completion, [self.tokenizer.decode(c, skip_special_tokens=True) for c in completion]
 
 dpo_model: DPOModel = DPOModel()
+ref_model: DPOModel = DPOModel()
 # %%
 
 sample_ids, samples = dpo_model.generate(
@@ -116,7 +124,7 @@ class DPOTrainingArgs():
     use_wandb: bool = False
 
     # Duration of different phases
-    # total_phases: int = 200
+    train_length: int = 64*40
     batch_size: int = 64
     # num_minibatches: int = 4
     # batches_per_learning_phase: int = 2
@@ -198,6 +206,62 @@ hf_dataset = datasets.load_dataset(hf_dataset_name, split="train")
 train_dataloader = t.utils.data.DataLoader(hf_dataset, batch_size=args.batch_size, collate_fn=collate_prompt_integrated, shuffle=True)
 # %%
 # On the fly dataloader
+def generate_batch_of_pairs(
+    prompt: str,
+    model: DPOModel = ref_model,
+    tokenizer: PreTrainedTokenizer = tokenizer,
+    batch_size: int = args.batch_size,
+    temperature: float = 1.0,
+    max_length: int = args.gen_len,
+    device: t.device = device
+) -> tuple[Int[Tensor, "batch seq_len"], Int[Tensor, "batch seq_len"]]:
+    """Generate a batch of preferred and rejected completions using the reference model."""
+    encoded_prompt = tokenizer(prompt, return_tensors="pt").to(device)
+    
+    with t.no_grad():
+        outputs = model.generate(
+            encoded_prompt,
+            max_length=max_length,
+            batch_size=batch_size*2,
+            num_return_sequences=1,
+            do_sample=True,
+            temperature=temperature
+        )
+    
+    return outputs[:batch_size], outputs[batch_size:]
+
+class OnTheFlyDataset(t.utils.data.Dataset):
+    def __init__(
+            self, 
+            prompt: str, 
+            judge_fn: Callable[[str, str], Literal[0, 1]],
+            ref_model: DPOModel = ref_model, 
+            tokenizer: PreTrainedTokenizer = tokenizer, 
+            num_samples: int = args.train_length,
+        ):
+        self.prompt = prompt
+        self.ref_model = ref_model
+        self.tokenizer = tokenizer
+        self.num_samples = num_samples
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        preferred, rejected = generate_batch_of_pairs(self.prompt, self.ref_model, self.tokenizer, batch_size=1)
+        return {
+            preferred_column: self.tokenizer.decode(preferred[0], skip_special_tokens=True),
+            rejected_column: self.tokenizer.decode(rejected[0], skip_special_tokens=True)
+        }
+
+# Create the on-the-fly dataset and dataloader
+on_the_fly_dataset = OnTheFlyDataset(prompt=args.prefix, num_samples=args.train_length)
+on_the_fly_dataloader = t.utils.data.DataLoader(
+    on_the_fly_dataset,
+    batch_size=args.batch_size,
+    collate_fn=lambda batch: collate_prompt_integrated(batch, tokenizer),
+    num_workers=4
+)
 
 
 # %%
