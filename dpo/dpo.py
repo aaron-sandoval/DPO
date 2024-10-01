@@ -17,11 +17,12 @@ from rich import print as rprint
 from rich.table import Table
 from torch import Tensor
 import datasets
-from transformers import GPT2LMHeadModel, GPT2Tokenizer, PreTrainedTokenizer
+from transformers import GPT2LMHeadModel, GPT2Tokenizer, PreTrainedTokenizer, logging
 # from transformers import pipeline, set_seed
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
 
+logging.set_verbosity_warning()
 device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
 MAIN = __name__ == "__main__"
 
@@ -54,12 +55,11 @@ class DPOModel(nn.Module):
             batch_size: int = 1,
             gen_len: int = 20,
             temperature: float = 1.0,
-            device: t.device="cpu",
             **kwargs
         ) -> tuple[Int[Tensor, "batch_size prompt_len_plus_gen_len"], list[str]]:
-        encoded = self.tokenizer(prompt, return_tensors='pt').to(device)
+        encoded = self.tokenizer(prompt, return_tensors='pt')
         completion = self.model.generate(
-            encoded.input_ids,
+            encoded.input_ids.to(self.model.device),
             max_new_tokens=gen_len,
             temperature=temperature,
             num_return_sequences=batch_size,
@@ -250,33 +250,33 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
         self.tokenizer = tokenizer
         self.num_samples = num_samples
         self.encoded_prompt = tokenizer(self.prompt, return_tensors="pt").to(device)
+        self.cache_batch_size = args.batch_size
+        self.cache = [0] * self.num_samples
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        preferred, rejected = self.generate_preference_pairs(batch_size=1)
-        return {
-            "preferred": self.tokenizer.decode(preferred[0], skip_special_tokens=True),
-            "rejected": self.tokenizer.decode(rejected[0], skip_special_tokens=True)
-        }
+        if self.cache[idx] == 0:
+            preferred, rejected = self.generate_preference_pairs(batch_size=self.cache_batch_size)
+            cache_slice = slice(idx-idx%self.cache_batch_size, idx-idx%self.cache_batch_size+self.cache_batch_size)
+            self.cache[cache_slice] = ((self.tokenizer.decode(p), self.tokenizer.decode(r)) for p, r in zip(preferred, rejected))
+        return dict(zip(("preferred", "rejected"), self.cache[idx]))
         
     @t.inference_mode()
     def generate_preference_pairs(
         self,
         batch_size: int,
         temperature: float = 1.0,
-        max_length: int = args.gen_len,
+        gen_len: int = args.gen_len,
         device: t.device = device
     ) -> tuple[Int[Tensor, "batch seq_len"], Int[Tensor, "batch seq_len"]]:
         """Generate a batch of preferred and rejected completions using the reference model."""
-        
         gen_tokens, gen_strings = self.gen_model.generate(
             self.prompt,
-            max_length=max_length,
+            gen_len=gen_len,
             batch_size=batch_size*2,
             temperature=temperature,
-            device=device
         )
         preferred_index_0: Bool[Tensor, "batch"] = self.judge_fn(gen_strings[:batch_size], gen_strings[batch_size:], tokenizer=tokenizer)
         preferred_mask: Bool[Tensor, "2 batch"] = t.stack([preferred_index_0, ~preferred_index_0], dim=0).to(device)
@@ -300,7 +300,6 @@ on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
 on_the_fly_dataloader = t.utils.data.DataLoader(
     on_the_fly_dataset,
     batch_size=args.batch_size,
-    # num_workers=4
 )
 
 # a = on_the_fly_dataset.generate_preference_pairs(batch_size=4)
