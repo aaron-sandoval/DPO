@@ -187,75 +187,117 @@ def get_optimizer_and_scheduler(args: DPOTrainingArgs, model: DPOModel):
 
 # %%
 # HF Dataset
-hf_dataset_name = "Anthropic/hh-rlhf"
-preferred_column: str = "chosen"
-rejected_column: str = "rejected"
-def collate_prompt_integrated(
-        batch: Sequence[dict[str, str]], 
-        tokenizer: PreTrainedTokenizer, 
-        max_length: int = args.gen_len, 
-        device: t.device = device
-    ):
-    """Collate function for dataset where the prompt is already concatenated with the text completions.
-    """
-    preferred_tokens: list[Int[Tensor, "seq_len"]] = [tokenizer(item[preferred_column], padding=True, truncation=True, max_length=max_length, return_tensors="pt").to(device) for item in batch]
-    rejected_tokens: list[Int[Tensor, "seq_len"]] = [tokenizer(item[rejected_column], padding=True, truncation=True, max_length=max_length, return_tensors="pt").to(device) for item in batch]
+# hf_dataset_name = "Anthropic/hh-rlhf"
+# preferred_column: str = "chosen"
+# rejected_column: str = "rejected"
+# def collate_prompt_integrated(
+#         batch: Sequence[dict[str, str]], 
+#         tokenizer: PreTrainedTokenizer, 
+#         max_length: int = args.gen_len, 
+#         device: t.device = device
+#     ):
+#     """Collate function for dataset where the prompt is already concatenated with the text completions.
+#     """
+#     preferred_tokens: list[Int[Tensor, "seq_len"]] = [tokenizer(item[preferred_column], padding=True, truncation=True, max_length=max_length, return_tensors="pt").to(device) for item in batch]
+#     rejected_tokens: list[Int[Tensor, "seq_len"]] = [tokenizer(item[rejected_column], padding=True, truncation=True, max_length=max_length, return_tensors="pt").to(device) for item in batch]
     
 
-hf_dataset = datasets.load_dataset(hf_dataset_name, split="train")
-train_dataloader = t.utils.data.DataLoader(hf_dataset, batch_size=args.batch_size, collate_fn=collate_prompt_integrated, shuffle=True)
+# hf_dataset = datasets.load_dataset(hf_dataset_name, split="train")
+# train_dataloader = t.utils.data.DataLoader(hf_dataset, batch_size=args.batch_size, collate_fn=collate_prompt_integrated, shuffle=True)
+# %%
+# Reward and judge functions: simulating human preferences
+def reward_char_count(generated_sample: str, char: str = '.') -> float:
+    """
+    Reward function, evaluated on the generated samples.
+
+    In this case it's very simple: it just counts the number of instances of a particular character in
+    the generated sample. It returns a tensor of rewards of dtype float the input is a list, or a single
+    reward (float) if the input is a string.
+    """
+    if isinstance(generated_sample, str):
+        return float(generated_sample.count(char))
+    else:
+        return t.tensor([float(s.count(char)) for s in generated_sample])
+
+def reward_to_judge(reward_fn: Callable[[str], float | int]) -> Callable[[Sequence[str], Sequence[str]], Int[Tensor, "batch"]]:
+    """
+    Converts a reward function to a judge function.
+    """
+    def judge_fn(generated_samples: Sequence[str]) -> Int[Tensor, "batch"]:
+        rewards = reward_fn(generated_samples)
+        return t.argmax(rewards, dim=0)
+    return judge_fn
+    
 # %%
 # On the fly dataloader
-def generate_batch_of_pairs(
-    prompt: str,
-    model: DPOModel = ref_model,
-    tokenizer: PreTrainedTokenizer = tokenizer,
-    batch_size: int = args.batch_size,
-    temperature: float = 1.0,
-    max_length: int = args.gen_len,
-    device: t.device = device
-) -> tuple[Int[Tensor, "batch seq_len"], Int[Tensor, "batch seq_len"]]:
-    """Generate a batch of preferred and rejected completions using the reference model."""
-    encoded_prompt = tokenizer(prompt, return_tensors="pt").to(device)
-    
-    with t.no_grad():
-        outputs = model.generate(
-            encoded_prompt,
+
+class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
+    def __init__(
+            self, 
+            prompt: str, 
+            judge_fn: Callable[[Sequence[str], Sequence[str]], Int[Tensor, "batch"]],
+            gen_model: DPOModel = ref_model, 
+            tokenizer: PreTrainedTokenizer = tokenizer, 
+            num_samples: int = args.train_length,
+        ):
+        """
+        Args:
+            prompt: The prompt to use for generating the completions.
+            judge_fn: A function that takes in pairs of generated completions and returns a tensor indexing the preferred completion.
+            ref_model: The reference model to use for generating the completions.
+            tokenizer: The tokenizer to use for encoding the completions.
+            num_samples: The number of samples to generate.
+        """
+        self.prompt = prompt
+        self.judge_fn = judge_fn
+        self.gen_model = gen_model
+        self.tokenizer = tokenizer
+        self.num_samples = num_samples
+        self.encoded_prompt = tokenizer(self.prompt, return_tensors="pt").to(device)
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        preferred, rejected = self.generate_preference_pairs(batch_size=1)
+        return {
+            "preferred_column": self.tokenizer.decode(preferred[0], skip_special_tokens=True),
+            "rejected_column": self.tokenizer.decode(rejected[0], skip_special_tokens=True)
+        }
+        
+    @t.inference_mode()
+    def generate_preference_pairs(
+        self,
+        batch_size: int,
+        temperature: float = 1.0,
+        max_length: int = args.gen_len,
+        device: t.device = device
+    ) -> tuple[Int[Tensor, "batch seq_len"], Int[Tensor, "batch seq_len"]]:
+        """Generate a batch of preferred and rejected completions using the reference model."""
+        
+        gen_tokens, gen_strings = self.gen_model.generate(
+            self.encoded_prompt,
             max_length=max_length,
             batch_size=batch_size*2,
             num_return_sequences=1,
             do_sample=True,
             temperature=temperature
         )
-    
-    return outputs[:batch_size], outputs[batch_size:]
-
-class OnTheFlyDataset(t.utils.data.Dataset):
-    def __init__(
-            self, 
-            prompt: str, 
-            judge_fn: Callable[[str, str], Literal[0, 1]],
-            ref_model: DPOModel = ref_model, 
-            tokenizer: PreTrainedTokenizer = tokenizer, 
-            num_samples: int = args.train_length,
-        ):
-        self.prompt = prompt
-        self.ref_model = ref_model
-        self.tokenizer = tokenizer
-        self.num_samples = num_samples
-
-    def __len__(self):
-        return self.num_samples
-
-    def __getitem__(self, idx):
-        preferred, rejected = generate_batch_of_pairs(self.prompt, self.ref_model, self.tokenizer, batch_size=1)
-        return {
-            preferred_column: self.tokenizer.decode(preferred[0], skip_special_tokens=True),
-            rejected_column: self.tokenizer.decode(rejected[0], skip_special_tokens=True)
-        }
+        preferred_indices = self.judge_fn(gen_strings[:batch_size], gen_strings[batch_size:], tokenizer=tokenizer)
+        # Reshape gen_tokens into (2, batch_size, seq_len)
+        gen_tokens_reshaped = einops.rearrange(gen_tokens, "(b1 b2) ... -> b1 b2 ...", b1=2)
+        
+        # Gather preferred and rejected completions
+        preferred_tokens = t.gather(gen_tokens_reshaped, 0, preferred_indices.unsqueeze(0).unsqueeze(-1).expand(-1, -1, gen_tokens_reshaped.size(-1)))
+        rejected_tokens = t.gather(gen_tokens_reshaped, 0, (1 - preferred_indices).unsqueeze(0).unsqueeze(-1).expand(-1, -1, gen_tokens_reshaped.size(-1)))
+        
+        # Squeeze to remove the extra dimension
+        preferred_tokens = preferred_tokens.squeeze(0)
+        rejected_tokens = rejected_tokens.squeeze(0)
+        return preferred_tokens, rejected_tokens
 
 # Create the on-the-fly dataset and dataloader
-on_the_fly_dataset = OnTheFlyDataset(prompt=args.prefix, num_samples=args.train_length)
+on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(prompt=args.prefix, num_samples=args.train_length)
 on_the_fly_dataloader = t.utils.data.DataLoader(
     on_the_fly_dataset,
     batch_size=args.batch_size,
