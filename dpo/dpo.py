@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Callable, Union
+from typing import Callable, Union, Sequence, Any
 
 import einops
 import numpy as np
@@ -17,7 +17,7 @@ from rich import print as rprint
 from rich.table import Table
 from torch import Tensor
 import datasets
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import GPT2LMHeadModel, GPT2Tokenizer, PreTrainedTokenizer
 # from transformers import pipeline, set_seed
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
@@ -178,9 +178,28 @@ def get_optimizer_and_scheduler(args: DPOTrainingArgs, model: DPOModel):
     return optimizer, scheduler
 
 # %%
-# Dataset
+# HF Dataset
 hf_dataset_name = "Anthropic/hh-rlhf"
-dataset = datasets.load_dataset(hf_dataset_name)
+preferred_column: str = "chosen"
+rejected_column: str = "rejected"
+def collate_prompt_integrated(
+        batch: Sequence[dict[str, str]], 
+        tokenizer: PreTrainedTokenizer, 
+        max_length: int = args.gen_len, 
+        device: t.device = device
+    ):
+    """Collate function for dataset where the prompt is already concatenated with the text completions.
+    """
+    preferred_tokens: list[Int[Tensor, "seq_len"]] = [tokenizer(item[preferred_column], padding=True, truncation=True, max_length=max_length, return_tensors="pt").to(device) for item in batch]
+    rejected_tokens: list[Int[Tensor, "seq_len"]] = [tokenizer(item[rejected_column], padding=True, truncation=True, max_length=max_length, return_tensors="pt").to(device) for item in batch]
+    
+
+hf_dataset = datasets.load_dataset(hf_dataset_name, split="train")
+train_dataloader = t.utils.data.DataLoader(hf_dataset, batch_size=args.batch_size, collate_fn=collate_prompt_integrated, shuffle=True)
+# %%
+# On the fly dataloader
+
+
 # %%
 @dataclass
 class DPOTrainer:
