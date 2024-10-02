@@ -119,6 +119,9 @@ def reward_up_to_max_length(sample: str, length: int = 150, *args, **kwargs) -> 
 def reward_target_length(sample: str, length: int = 80, *args, **kwargs) -> int:
     return - abs(length - len(sample))
 
+def reward_vowel_proportion(sample: str, *args, **kwargs) -> float:
+    return sum(c.lower() in "aeiou" for c in sample) / len(sample)
+
 def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) -> Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]]:
     """
     Converts a reward function to a judge function.
@@ -132,13 +135,17 @@ def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) ->
 judge_periods = reward_to_judge(reward_char_count, char='.')
 judge_up_to_max_length = reward_to_judge(reward_up_to_max_length)
 judge_target_length = reward_to_judge(reward_target_length)
+judge_vowel_proportion = reward_to_judge(reward_vowel_proportion)
 assert t.all(judge_periods(["This is a test.", "This is a test.", "This is a test."], ["This is a test", "This is a test..", "This. is a test."]) == t.tensor([True, False, False]))
 # %%
 
 @dataclass
 class DPOTrainingArgs():
-    # Basic / global
+    # Judge and reward functions
+    judge_fn: Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]]
+    implicit_reward_fn: Optional[Callable[[str], float | int]] = None
 
+    # Basic / global
     seed: int = 1
     cuda: bool = t.cuda.is_available()
 
@@ -167,8 +174,12 @@ class DPOTrainingArgs():
 
     # Extra stuff for DPO
     dpo_beta: float = 0.1
-    judge_fn: Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]] = judge_periods
 
+
+args = DPOTrainingArgs(
+    judge_fn=judge_vowel_proportion, 
+    implicit_reward_fn=reward_vowel_proportion,
+)
 # %%
 def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     """
@@ -176,9 +187,6 @@ def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     """
     return t.optim.Adam(params=model.model.parameters(), lr = args.base_learning_rate)
 
-
-
-args = DPOTrainingArgs(judge_fn=judge_target_length)
 optimizer = get_optimizer(args, dpo_model)
 
 # %%
@@ -322,8 +330,8 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
 on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
     prompt=args.prefix, 
     judge_fn=args.judge_fn, 
-    implicit_reward_fn=reward_target_length,
-    gen_model=ref_model, 
+    implicit_reward_fn=args.implicit_reward_fn,
+    gen_model=dpo_model, 
     num_samples=args.train_length
 )
 on_the_fly_dataloader = t.utils.data.DataLoader(
@@ -357,7 +365,7 @@ class DPOTrainer:
         self.optimizer, self.scheduler = get_optimizer_and_scheduler(self.args, self.model)
         self.step = 0
         self.save_model = save_model
-        self.judge_fn_name = self.dataloader.dataset.judge_fn.__name__
+        self.judge_fn_name = self.args.judge_fn.__name__
         if hasattr(self.dataloader.dataset, "implicit_reward_fn"):
             self.implicit_reward_fn = self.dataloader.dataset.implicit_reward_fn
         else:
@@ -390,21 +398,21 @@ class DPOTrainer:
     def _train(self):
         for batch in tqdm(self.dataloader):
             if self.args.use_wandb and self.implicit_reward_fn is not None:
-                _, gen_strings = self.model.generate(
-                    self.dataloader.dataset.prompt, 
-                    batch_size=self.args.batch_size, 
-                    gen_len=self.args.gen_len,
-                    temperature=self.args.temperature,
-                )
-                gen_rewards = t.tensor([self.implicit_reward_fn(gen_str) for gen_str in gen_strings], dtype=t.float16, requires_grad=False)
-                # pref_strs: list[str] = [tokenizer.decode(ids) for ids in batch["preferred"]]
-                # rej_strs: list[str] = [tokenizer.decode(ids) for ids in batch["rejected"]]
+                # _, gen_strings = self.model.generate(
+                #     self.dataloader.dataset.prompt, 
+                #     batch_size=self.args.batch_size, 
+                #     gen_len=self.args.gen_len,
+                #     temperature=self.args.temperature,
+                # )
+                pref_strs: list[str] = [tokenizer.decode(ids) for ids in batch["preferred"]]
+                rej_strs: list[str] = [tokenizer.decode(ids) for ids in batch["rejected"]]
+                gen_rewards = t.tensor([self.implicit_reward_fn(gen_str) for gen_str in pref_strs+rej_strs], dtype=t.float16, requires_grad=False)
                 # pref_rewards: list[float] = [self.implicit_reward_fn(pref_str) for pref_str in pref_strs]
                 # rej_rewards: list[float] = [self.implicit_reward_fn(rej_str) for rej_str in rej_strs]
                 # all_rewards = t.tensor(pref_rewards + rej_rewards, requires_grad=False)
                 # avg_pref_reward: float = sum(pref_rewards) / len(pref_strs)
                 # avg_rej_reward: float = sum(rej_rewards) / len(rej_strs)
-                print(gen_strings[0])
+                print(pref_strs[0])
                 wandb.log({
                     "reward": {
                         # "mean_preferred": avg_pref_reward,
