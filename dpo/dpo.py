@@ -443,6 +443,8 @@ class DPOTrainer:
             self.step += 1
 
     def train(self):
+        self.model.train()
+        self.ref_model.eval()
         if self.args.use_wandb:
             wandb.init(
                 project=self.args.wandb_project_name,
