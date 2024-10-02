@@ -27,6 +27,8 @@ from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 logging.set_verbosity_error()
 device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
 MAIN = __name__ == "__main__"
+ROOT = Path(__file__).parent.parent
+DATA_DIR = ROOT / "data"
 
 LOW_GPU_MEM = False
 BASE_MODEL = "gpt2" if LOW_GPU_MEM else "gpt2-medium"
@@ -76,7 +78,7 @@ class DPOModel(nn.Module):
 
     def save_model(self, path: Optional[str] = None, suffix: Optional[str] = None):
         if path is None:
-            path = Path(f"data/models")
+            path = DATA_DIR / "models"
         if suffix is None:
             suffix = ""
         dt = datetime.now().isoformat(timespec='minutes').replace(':', '')
@@ -85,7 +87,7 @@ class DPOModel(nn.Module):
 
     @classmethod
     def load_model(cls, name: str, **kwargs):
-        path = Path(f"data/models/{name}.pt")
+        path = DATA_DIR / "models" / f"{name}.pt"
         return cls(model=path, **kwargs)
 
 
@@ -140,7 +142,7 @@ class DPOTrainingArgs():
     use_wandb: bool = True
 
     # Duration of different phases
-    train_length: int = 64*3000
+    train_length: int = 64*1000
     batch_size: int = 64
 
     # Optimization hyperparameters
@@ -346,6 +348,7 @@ class DPOTrainer:
             self.ref_model = ref_model
         self.optimizer, self.scheduler = get_optimizer_and_scheduler(self.args, self.model)
         self.step = 0
+        self.judge_fn_name = self.dataloader.dataset.judge_fn.__name__
         if hasattr(self.dataloader.dataset, "implicit_reward_fn"):
             self.implicit_reward_fn = self.dataloader.dataset.implicit_reward_fn
         else:
@@ -376,13 +379,19 @@ class DPOTrainer:
             if self.args.use_wandb and self.implicit_reward_fn is not None:
                 pref_strs: list[str] = [tokenizer.decode(ids) for ids in batch["preferred"]]
                 rej_strs: list[str] = [tokenizer.decode(ids) for ids in batch["rejected"]]
-                avg_pref_reward: float = sum(self.implicit_reward_fn(pref_str) for pref_str in pref_strs) / len(pref_strs)
-                avg_rej_reward: float = sum(self.implicit_reward_fn(rej_str) for rej_str in rej_strs) / len(rej_strs)
+                pref_rewards: list[float] = [self.implicit_reward_fn(pref_str) for pref_str in pref_strs]
+                rej_rewards: list[float] = [self.implicit_reward_fn(rej_str) for rej_str in rej_strs]
+                all_rewards = t.tensor(pref_rewards + rej_rewards, requires_grad=False)
+                avg_pref_reward: float = sum(pref_rewards) / len(pref_strs)
+                avg_rej_reward: float = sum(rej_rewards) / len(rej_strs)
                 print(pref_strs[0])
                 wandb.log({
                     "reward": {
-                        "preferred": avg_pref_reward,
-                        "rejected": avg_rej_reward
+                        "mean_preferred": avg_pref_reward,
+                        "mean_rejected": avg_rej_reward,
+                        "mean": (avg_pref_reward + avg_rej_reward) / 2,
+                        "all": all_rewards,
+                        "lr": self.scheduler.get_last_lr()[0],
                     }
                 }, step=self.step)
             self.optimizer.zero_grad()
@@ -410,19 +419,21 @@ class DPOTrainer:
             wandb.init(
                 project=self.args.wandb_project_name,
                 entity=self.args.wandb_entity,
-                name=f"{self.args.exp_name}__{self.args.seed}__{datetime.now().isoformat(timespec='minutes').replace(':', '')}",
+                name=f"{self.args.exp_name}_seed={self.args.seed}_{datetime.now().isoformat(timespec='minutes').replace(':', '')}_{self.judge_fn_name}",
                 config=self.args,
             )
             try:
                 self._train()
             finally:
+                self.model.save_model(suffix=f"_{self.judge_fn_name}_{self.step}")
                 wandb.finish()
         else:
             self._train()
         
 
 # %%
-# args.base_learning_rate = 4e-6
+args.base_learning_rate = 4e-6
+# args.final_scale = 0.2
 # args.dpo_beta = 0.5
 args.use_wandb = True
 trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
@@ -445,5 +456,4 @@ gen_tokens, gen_strings = dpo_model.generate(
         )
 print(gen_strings)
 # %%
-
 
