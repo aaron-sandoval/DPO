@@ -10,6 +10,7 @@ import einops
 import numpy as np
 import torch as t
 import torch.nn as nn
+from tqdm.auto import tqdm
 import wandb
 # from eindex import eindex
 from jaxtyping import Float, Int, Bool
@@ -22,7 +23,7 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer, PreTrainedTokenizer, lo
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
 
-logging.set_verbosity_warning()
+logging.set_verbosity_error()
 device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
 MAIN = __name__ == "__main__"
 
@@ -48,8 +49,7 @@ class DPOModel(nn.Module):
             
             self.model = GPT2LMHeadModel.from_pretrained(model).to(device)
         self.tokenizer = tokenizer
-        self.d_model: int = self.model.config.n_embd
-        self.d_vocab: int = len(self.tokenizer)
+        self.model.generation_config.pad_token_id = tokenizer.pad_token_id
 
     def forward(self, input_ids: Int[Tensor, "batch seq_len"], **kwargs):
         return self.model(input_ids=input_ids, **kwargs).logits
@@ -121,10 +121,10 @@ class DPOTrainingArgs():
     exp_name: str = "DPO_Implementation"
     wandb_project_name: str | None = "capstone_dpo"
     wandb_entity: str | None = None  
-    use_wandb: bool = False
+    use_wandb: bool = True
 
     # Duration of different phases
-    train_length: int = 64*200
+    train_length: int = 64*500
     batch_size: int = 64
     # num_minibatches: int = 4
     # batches_per_learning_phase: int = 2
@@ -243,6 +243,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
             self, 
             prompt: str, 
             judge_fn: Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]],
+            implicit_reward_fn: Optional[Callable[[str], float | int]] = None,
             gen_model: DPOModel = ref_model, 
             num_samples: int = args.train_length,
         ):
@@ -256,6 +257,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
         """
         self.prompt = prompt
         self.prefix_len = len(tokenizer(prompt)["input_ids"])
+        self.implicit_reward_fn = implicit_reward_fn
         self.judge_fn = judge_fn
         self.gen_model = gen_model
         self.num_samples = num_samples
@@ -303,6 +305,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
 on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
     prompt=args.prefix, 
     judge_fn=judge_periods, 
+    implicit_reward_fn=reward_char_count,
     gen_model=dpo_model, 
     num_samples=args.train_length
 )
@@ -335,6 +338,10 @@ class DPOTrainer:
             self.ref_model = ref_model
         self.optimizer, self.scheduler = get_optimizer_and_scheduler(self.args, self.model)
         self.step = 0
+        if hasattr(self.dataloader.dataset, "implicit_reward_fn"):
+            self.implicit_reward_fn = self.dataloader.dataset.implicit_reward_fn
+        else:
+            self.implicit_reward_fn = None
 
     def dpo_loss(
             self, 
@@ -357,7 +364,19 @@ class DPOTrainer:
         return loss
     
     def _train(self):
-        for batch in self.dataloader:
+        for batch in tqdm(self.dataloader):
+            if self.args.use_wandb and self.implicit_reward_fn is not None:
+                pref_strs: list[str] = [tokenizer.decode(ids) for ids in batch["preferred"]]
+                rej_strs: list[str] = [tokenizer.decode(ids) for ids in batch["rejected"]]
+                avg_pref_reward: float = sum(self.implicit_reward_fn(pref_str) for pref_str in pref_strs) / len(pref_strs)
+                avg_rej_reward: float = sum(self.implicit_reward_fn(rej_str) for rej_str in rej_strs) / len(rej_strs)
+                print(pref_strs[0])
+                wandb.log({
+                    "reward": {
+                        "preferred": avg_pref_reward,
+                        "rejected": avg_rej_reward
+                    }
+                }, step=self.step)
             self.optimizer.zero_grad()
             preferred_ids = batch["preferred"].to(device)
             rejected_ids = batch["rejected"].to(device)
@@ -395,8 +414,8 @@ class DPOTrainer:
         
 
 # %%
+args.base_learning_rate = 4e-6
 args.use_wandb = True
-args.base_learning_rate = 1e-6
 trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
 trainer.train()
 # %%
@@ -409,5 +428,11 @@ def print_model_layer_dtype(model):
     for name, param in model.named_parameters():
         print(f"Param: {name}\tdtype: {param.dtype}")
 # %%
-print_model_layer_dtype(dpo_model.model)
-print_model_layer_dtype(ref_model.model)
+gen_tokens, gen_strings = dpo_model.generate(
+            on_the_fly_dataset.prompt,
+            gen_len=args.gen_len,
+            batch_size=4,
+            temperature=args.temperature,
+        )
+print(gen_strings)
+# %%
