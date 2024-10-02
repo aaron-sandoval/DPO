@@ -113,8 +113,11 @@ rprint(table)
 def reward_char_count(sample: str, char: str = '.', *args, **kwargs) -> int:
     return sample.count(char)
 
-def reward_length(sample: str, length: int = 150, *args, **kwargs) -> int:
+def reward_up_to_max_length(sample: str, length: int = 150, *args, **kwargs) -> int:
     return len(sample) if len(sample) <= length else -1
+
+def reward_target_length(sample: str, length: int = 80, *args, **kwargs) -> int:
+    return - abs(length - len(sample))
 
 def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) -> Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]]:
     """
@@ -127,8 +130,8 @@ def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) ->
     return judge_fn
 
 judge_periods = reward_to_judge(reward_char_count, char='.')
-judge_length = reward_to_judge(reward_length)
-
+judge_up_to_max_length = reward_to_judge(reward_up_to_max_length)
+judge_target_length = reward_to_judge(reward_target_length)
 assert t.all(judge_periods(["This is a test.", "This is a test.", "This is a test."], ["This is a test", "This is a test..", "This. is a test."]) == t.tensor([True, False, False]))
 # %%
 
@@ -175,7 +178,7 @@ def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
 
 
 
-args = DPOTrainingArgs(judge_fn=judge_length)
+args = DPOTrainingArgs(judge_fn=judge_target_length)
 optimizer = get_optimizer(args, dpo_model)
 
 # %%
@@ -319,7 +322,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
 on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
     prompt=args.prefix, 
     judge_fn=args.judge_fn, 
-    implicit_reward_fn=reward_length,
+    implicit_reward_fn=reward_target_length,
     gen_model=dpo_model, 
     num_samples=args.train_length
 )
