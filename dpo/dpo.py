@@ -1,6 +1,7 @@
 # %%
 import sys
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -73,6 +74,21 @@ class DPOModel(nn.Module):
         )
         return completion, [self.tokenizer.decode(c, skip_special_tokens=True) for c in completion]
 
+    def save_model(self, path: Optional[str] = None, suffix: Optional[str] = None):
+        if path is None:
+            path = Path(f"data/models")
+        if suffix is None:
+            suffix = ""
+        dt = datetime.now().isoformat(timespec='minutes').replace(':', '')
+        path = path / f"{dt}{suffix}.pt"
+        self.model.save_pretrained(path)
+
+    @classmethod
+    def load_model(cls, name: str, **kwargs):
+        path = Path(f"data/models/{name}.pt")
+        return cls(model=path, **kwargs)
+
+
 dpo_model: DPOModel = DPOModel()
 ref_model: DPOModel = DPOModel(fp16=True)
 # %%
@@ -124,10 +140,8 @@ class DPOTrainingArgs():
     use_wandb: bool = True
 
     # Duration of different phases
-    train_length: int = 64*500
+    train_length: int = 64*3000
     batch_size: int = 64
-    # num_minibatches: int = 4
-    # batches_per_learning_phase: int = 2
 
     # Optimization hyperparameters
     base_learning_rate: float = 1e-6  # Rafailov et al. 2024
@@ -136,21 +150,15 @@ class DPOTrainingArgs():
     warmup_steps: int = 150  # Rafailov et al. 2024
     final_scale: float = 0.1
 
-    # Computing other PPO loss functions
-    # clip_coef: float = 0.2
-    # vf_coef: float = 0.15
-    # ent_coef: float = 0.001
-
     # Base model & sampling arguments
     base_model: str = BASE_MODEL
     gen_len: int = 30
     temperature: float = 0.6
     prefix: str = "This is"
 
-    # Extra stuff for RLHF
+    # Extra stuff for DPO
     dpo_beta: float = 0.1
-    reward_fn: Callable = judge_periods
-    normalize_reward: bool = False
+    judge_fn: Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]] = judge_periods
 
 # %%
 def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
@@ -304,7 +312,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
 # Create the on-the-fly dataset and dataloader
 on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
     prompt=args.prefix, 
-    judge_fn=judge_periods, 
+    judge_fn=args.judge_fn, 
     implicit_reward_fn=reward_char_count,
     gen_model=dpo_model, 
     num_samples=args.train_length
@@ -402,7 +410,7 @@ class DPOTrainer:
             wandb.init(
                 project=self.args.wandb_project_name,
                 entity=self.args.wandb_entity,
-                name=f"{self.args.exp_name}__{self.args.seed}__{int(time.time())}",
+                name=f"{self.args.exp_name}__{self.args.seed}__{datetime.now().isoformat(timespec='minutes').replace(':', '')}",
                 config=self.args,
             )
             try:
@@ -414,7 +422,8 @@ class DPOTrainer:
         
 
 # %%
-args.base_learning_rate = 4e-6
+# args.base_learning_rate = 4e-6
+# args.dpo_beta = 0.5
 args.use_wandb = True
 trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
 trainer.train()
@@ -436,3 +445,5 @@ gen_tokens, gen_strings = dpo_model.generate(
         )
 print(gen_strings)
 # %%
+
+
