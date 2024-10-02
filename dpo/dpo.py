@@ -323,7 +323,7 @@ on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
     prompt=args.prefix, 
     judge_fn=args.judge_fn, 
     implicit_reward_fn=reward_target_length,
-    gen_model=dpo_model, 
+    gen_model=ref_model, 
     num_samples=args.train_length
 )
 on_the_fly_dataloader = t.utils.data.DataLoader(
@@ -378,30 +378,41 @@ class DPOTrainer:
         if self.args.use_wandb:
             wandb.log({
                 "loss": loss,
-                "pref_relative_logprob": logprobs_pref_trained - logprobs_pref_ref,
-                "rej_relative_logprob": logprobs_rej_trained - logprobs_rej_ref,
+                "logprobs_pref_trained": logprobs_pref_trained,
+                "logprobs_rej_trained": logprobs_rej_trained,
+                "logprobs_pref_ref": logprobs_pref_ref,
+                "logprobs_rej_ref": logprobs_rej_ref,
+                # "pref_relative_logprob": logprobs_pref_trained - logprobs_pref_ref,
+                # "rej_relative_logprob": logprobs_rej_trained - logprobs_rej_ref,
             }, step=self.step)
         return loss
     
     def _train(self):
         for batch in tqdm(self.dataloader):
             if self.args.use_wandb and self.implicit_reward_fn is not None:
-                pref_strs: list[str] = [tokenizer.decode(ids) for ids in batch["preferred"]]
-                rej_strs: list[str] = [tokenizer.decode(ids) for ids in batch["rejected"]]
-                pref_rewards: list[float] = [self.implicit_reward_fn(pref_str) for pref_str in pref_strs]
-                rej_rewards: list[float] = [self.implicit_reward_fn(rej_str) for rej_str in rej_strs]
-                all_rewards = t.tensor(pref_rewards + rej_rewards, requires_grad=False)
-                avg_pref_reward: float = sum(pref_rewards) / len(pref_strs)
-                avg_rej_reward: float = sum(rej_rewards) / len(rej_strs)
-                print(pref_strs[0])
+                _, gen_strings = self.model.generate(
+                    self.dataloader.dataset.prompt, 
+                    batch_size=self.args.batch_size, 
+                    gen_len=self.args.gen_len,
+                    temperature=self.args.temperature,
+                )
+                gen_rewards = t.tensor([self.implicit_reward_fn(gen_str) for gen_str in gen_strings], dtype=t.float16, requires_grad=False)
+                # pref_strs: list[str] = [tokenizer.decode(ids) for ids in batch["preferred"]]
+                # rej_strs: list[str] = [tokenizer.decode(ids) for ids in batch["rejected"]]
+                # pref_rewards: list[float] = [self.implicit_reward_fn(pref_str) for pref_str in pref_strs]
+                # rej_rewards: list[float] = [self.implicit_reward_fn(rej_str) for rej_str in rej_strs]
+                # all_rewards = t.tensor(pref_rewards + rej_rewards, requires_grad=False)
+                # avg_pref_reward: float = sum(pref_rewards) / len(pref_strs)
+                # avg_rej_reward: float = sum(rej_rewards) / len(rej_strs)
+                print(gen_strings[0])
                 wandb.log({
                     "reward": {
-                        "mean_preferred": avg_pref_reward,
-                        "mean_rejected": avg_rej_reward,
-                        "mean": (avg_pref_reward + avg_rej_reward) / 2,
-                        "all": all_rewards,
-                        "lr": self.scheduler.get_last_lr()[0],
-                    }
+                        # "mean_preferred": avg_pref_reward,
+                        # "mean_rejected": avg_rej_reward,
+                        "mean": gen_rewards.mean().item(),
+                        "all": gen_rewards ,
+                    },
+                    "lr": self.scheduler.get_last_lr()[0],
                 }, step=self.step)
             self.optimizer.zero_grad()
             preferred_ids = batch["preferred"].to(device)
@@ -444,7 +455,7 @@ class DPOTrainer:
 # %%
 args.base_learning_rate = 3e-6
 # args.final_scale = 0.2
-# args.dpo_beta = 0.5
+# args.dpo_beta = 0.2
 args.use_wandb = True
 trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
 trainer.train()
