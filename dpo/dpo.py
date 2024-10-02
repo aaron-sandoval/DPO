@@ -113,6 +113,9 @@ rprint(table)
 def reward_char_count(sample: str, char: str = '.', *args, **kwargs) -> int:
     return sample.count(char)
 
+def reward_length(sample: str, length: int = 150, *args, **kwargs) -> int:
+    return len(sample) if len(sample) <= length else -1
+
 def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) -> Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]]:
     """
     Converts a reward function to a judge function.
@@ -124,6 +127,7 @@ def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) ->
     return judge_fn
 
 judge_periods = reward_to_judge(reward_char_count, char='.')
+judge_length = reward_to_judge(reward_length)
 
 assert t.all(judge_periods(["This is a test.", "This is a test.", "This is a test."], ["This is a test", "This is a test..", "This. is a test."]) == t.tensor([True, False, False]))
 # %%
@@ -142,7 +146,7 @@ class DPOTrainingArgs():
     use_wandb: bool = True
 
     # Duration of different phases
-    train_length: int = 64*1000
+    train_length: int = 64*600
     batch_size: int = 64
 
     # Optimization hyperparameters
@@ -171,7 +175,7 @@ def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
 
 
 
-args = DPOTrainingArgs()
+args = DPOTrainingArgs(judge_fn=judge_length)
 optimizer = get_optimizer(args, dpo_model)
 
 # %%
@@ -315,7 +319,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
 on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
     prompt=args.prefix, 
     judge_fn=args.judge_fn, 
-    implicit_reward_fn=reward_char_count,
+    implicit_reward_fn=reward_length,
     gen_model=dpo_model, 
     num_samples=args.train_length
 )
@@ -337,6 +341,7 @@ class DPOTrainer:
             model: DPOModel, 
             dataloader: t.utils.data.DataLoader, 
             ref_model: Optional[DPOModel] = None,
+            save_model: bool = True,
             args: DPOTrainingArgs = args
         ):
         self.model = model
@@ -348,6 +353,7 @@ class DPOTrainer:
             self.ref_model = ref_model
         self.optimizer, self.scheduler = get_optimizer_and_scheduler(self.args, self.model)
         self.step = 0
+        self.save_model = save_model
         self.judge_fn_name = self.dataloader.dataset.judge_fn.__name__
         if hasattr(self.dataloader.dataset, "implicit_reward_fn"):
             self.implicit_reward_fn = self.dataloader.dataset.implicit_reward_fn
@@ -425,14 +431,15 @@ class DPOTrainer:
             try:
                 self._train()
             finally:
-                self.model.save_model(suffix=f"_{self.judge_fn_name}_{self.step}")
+                if self.save_model:
+                    self.model.save_model(suffix=f"_{self.judge_fn_name}_{self.step}")
                 wandb.finish()
         else:
             self._train()
         
 
 # %%
-args.base_learning_rate = 4e-6
+args.base_learning_rate = 3e-6
 # args.final_scale = 0.2
 # args.dpo_beta = 0.5
 args.use_wandb = True
