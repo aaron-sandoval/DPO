@@ -37,11 +37,16 @@ tokenizer = GPT2Tokenizer.from_pretrained(BASE_MODEL)
 class DPOModel(nn.Module):
     def __init__(
             self, 
-            model: GPT2LMHeadModel=GPT2LMHeadModel.from_pretrained(BASE_MODEL).to(device), 
-            tokenizer: GPT2Tokenizer=tokenizer
+            model: str = BASE_MODEL, 
+            tokenizer: GPT2Tokenizer=tokenizer,
+            fp16: bool = False,
         ):
         super().__init__()
-        self.model = model
+        if fp16:
+            self.model = GPT2LMHeadModel.from_pretrained(model).half().to(device)
+        else:
+            
+            self.model = GPT2LMHeadModel.from_pretrained(model).to(device)
         self.tokenizer = tokenizer
         self.d_model: int = self.model.config.n_embd
         self.d_vocab: int = len(self.tokenizer)
@@ -69,7 +74,7 @@ class DPOModel(nn.Module):
         return completion, [self.tokenizer.decode(c, skip_special_tokens=True) for c in completion]
 
 dpo_model: DPOModel = DPOModel()
-ref_model: DPOModel = DPOModel()
+ref_model: DPOModel = DPOModel(fp16=True)
 # %%
 
 sample_ids, samples = dpo_model.generate(
@@ -108,6 +113,7 @@ assert t.all(judge_periods(["This is a test.", "This is a test.", "This is a tes
 @dataclass
 class DPOTrainingArgs():
     # Basic / global
+
     seed: int = 1
     cuda: bool = t.cuda.is_available()
 
@@ -152,6 +158,7 @@ def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     Returns an Adam optimizer for the model, with the correct learning rates for the base and head.
     """
     return t.optim.Adam(params=model.model.parameters(), lr = args.base_learning_rate)
+
 
 
 args = DPOTrainingArgs()
@@ -323,7 +330,7 @@ class DPOTrainer:
         self.dataloader = dataloader
         self.args = args
         if ref_model is None:
-            self.ref_model = DPOModel()
+            self.ref_model = DPOModel(fp16=True)
         else:
             self.ref_model = ref_model
         self.optimizer, self.scheduler = get_optimizer_and_scheduler(self.args, self.model)
@@ -389,11 +396,18 @@ class DPOTrainer:
 
 # %%
 args.use_wandb = True
-# args.base_learning_rate = 1e-4
-trainer = DPOTrainer(dpo_model, on_the_fly_dataloader)
+args.base_learning_rate = 1e-6
+trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
 trainer.train()
 # %%
 if MAIN:
     print(dpo_model.generate("What is the capital of France?", batch_size=3))
 
 # %%
+def print_model_layer_dtype(model):
+    print('\nModel dtypes:')
+    for name, param in model.named_parameters():
+        print(f"Param: {name}\tdtype: {param.dtype}")
+# %%
+print_model_layer_dtype(dpo_model.model)
+print_model_layer_dtype(ref_model.model)
