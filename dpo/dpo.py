@@ -368,14 +368,18 @@ class DPOTrainer:
             if self.args.use_wandb and self.implicit_reward_fn is not None:
                 pref_strs: list[str] = [tokenizer.decode(ids) for ids in batch["preferred"]]
                 rej_strs: list[str] = [tokenizer.decode(ids) for ids in batch["rejected"]]
+                gen_rewards = t.tensor([self.implicit_reward_fn(gen_str) for gen_str in pref_strs+rej_strs], dtype=t.float16, requires_grad=False)
                 avg_pref_reward: float = sum(self.implicit_reward_fn(pref_str) for pref_str in pref_strs) / len(pref_strs)
                 avg_rej_reward: float = sum(self.implicit_reward_fn(rej_str) for rej_str in rej_strs) / len(rej_strs)
                 print(pref_strs[0])
                 wandb.log({
                     "reward": {
                         "preferred": avg_pref_reward,
-                        "rejected": avg_rej_reward
-                    }
+                        "rejected": avg_rej_reward,
+                        "mean": gen_rewards.mean().item(),
+                        "all": gen_rewards,
+                    },
+                    "lr": self.scheduler.get_last_lr()[0],
                 }, step=self.step)
             self.optimizer.zero_grad()
             preferred_ids = batch["preferred"].to(device)
