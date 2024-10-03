@@ -39,11 +39,13 @@ tokenizer = GPT2Tokenizer.from_pretrained(BASE_MODEL)
 class DPOModel(nn.Module):
     def __init__(
             self, 
-            model: str = BASE_MODEL, 
-            tokenizer: GPT2Tokenizer=tokenizer,
+            model: str, 
+            tokenizer: Optional[PreTrainedTokenizer] = None,
             fp16: bool = False,
         ):
         super().__init__()
+        if tokenizer is None:
+            tokenizer = PreTrainedTokenizer.from_pretrained(model)
         if fp16:
             self.model = GPT2LMHeadModel.from_pretrained(model).half().to(device)
         else:
@@ -87,8 +89,8 @@ class DPOModel(nn.Module):
     def load_model(cls, name: str, **kwargs):
         path = DATA_DIR / "models" / f"{name}.pt"
         return cls(model=path, **kwargs)
-dpo_model: DPOModel = DPOModel()
-ref_model: DPOModel = DPOModel(fp16=True)
+dpo_model: DPOModel = DPOModel(model=BASE_MODEL)
+ref_model: DPOModel = DPOModel(model=BASE_MODEL, fp16=True)
 # %%
 
 sample_ids, samples = dpo_model.generate(
@@ -367,7 +369,7 @@ class DPOTrainer:
         self.args = args
         self.save_model = save_model
         if ref_model is None:
-            self.ref_model = DPOModel(fp16=True)
+            self.ref_model = DPOModel(model=BASE_MODEL, fp16=True)
         else:
             self.ref_model = ref_model
         self.optimizer, self.scheduler = get_optimizer_and_scheduler(self.args, self.model)
