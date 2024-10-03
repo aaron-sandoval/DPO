@@ -124,7 +124,7 @@ class DPOTrainingArgs():
     use_wandb: bool = True
 
     # Duration of different phases
-    train_length: int = 64*500
+    train_length: int = 64*600
     batch_size: int = 64
     # num_minibatches: int = 4
     # batches_per_learning_phase: int = 2
@@ -132,7 +132,7 @@ class DPOTrainingArgs():
     # Optimization hyperparameters
     base_learning_rate: float = 1e-6  # Rafailov et al. 2024
     # head_learning_rate: float = 5e-4
-    max_grad_norm: float = 1.0
+    # max_grad_norm: float = 1.0
     warmup_steps: int = 150  # Rafailov et al. 2024
     final_scale: float = 0.1
 
@@ -149,9 +149,11 @@ class DPOTrainingArgs():
 
     # Extra stuff for RLHF
     dpo_beta: float = 0.1
-    reward_fn: Callable = judge_periods
+    judge_fn: Callable = judge_periods
+    implicit_reward_fn: Callable = reward_char_count
     normalize_reward: bool = False
 
+args = DPOTrainingArgs(judge_fn=judge_periods, implicit_reward_fn=reward_char_count)
 # %%
 def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     """
@@ -160,8 +162,6 @@ def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     return t.optim.Adam(params=model.model.parameters(), lr = args.base_learning_rate)
 
 
-
-args = DPOTrainingArgs()
 optimizer = get_optimizer(args, dpo_model)
 
 # %%
@@ -244,7 +244,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
             prompt: str, 
             judge_fn: Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]],
             implicit_reward_fn: Optional[Callable[[str], float | int]] = None,
-            gen_model: DPOModel = ref_model, 
+            gen_model: DPOModel = dpo_model, 
             num_samples: int = args.train_length,
         ):
         """
@@ -304,8 +304,8 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
 # Create the on-the-fly dataset and dataloader
 on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
     prompt=args.prefix, 
-    judge_fn=judge_periods, 
-    implicit_reward_fn=reward_char_count,
+    judge_fn=args.judge_fn, 
+    implicit_reward_fn=args.implicit_reward_fn,
     gen_model=dpo_model, 
     num_samples=args.train_length
 )
@@ -358,8 +358,10 @@ class DPOTrainer:
         if self.args.use_wandb:
             wandb.log({
                 "loss": loss,
-                "pref_relative_logprob": logprobs_pref_trained - logprobs_pref_ref,
-                "rej_relative_logprob": logprobs_rej_trained - logprobs_rej_ref,
+                "logprobs_pref_trained": logprobs_pref_trained,
+                "logprobs_rej_trained": logprobs_rej_trained,
+                "logprobs_pref_ref": logprobs_pref_ref,
+                "logprobs_rej_ref": logprobs_rej_ref,
             }, step=self.step)
         return loss
     
@@ -418,7 +420,7 @@ class DPOTrainer:
         
 
 # %%
-args.base_learning_rate = 4e-6
+args.base_learning_rate = 3e-6
 args.use_wandb = True
 trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
 trainer.train()
