@@ -111,6 +111,15 @@ rprint(table)
 def reward_char_count(sample: str, char: str = '.', *args, **kwargs) -> int:
     return sample.count(char)
 
+def reward_up_to_max_length(sample: str, length: int = 150, *args, **kwargs) -> int:
+    return len(sample) if len(sample) <= length else -1
+
+def reward_target_length(sample: str, length: int = 80, *args, **kwargs) -> int:
+    return - abs(length - len(sample))
+
+def reward_vowel_proportion(sample: str, *args, **kwargs) -> float:
+    return sum(c.lower() in "aeiou" for c in sample) / len(sample)
+
 def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) -> Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]]:
     """
     Converts a reward function to a judge function.
@@ -122,6 +131,9 @@ def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) ->
     return judge_fn
 
 judge_periods = reward_to_judge(reward_char_count, char='.')
+judge_up_to_max_length = reward_to_judge(reward_up_to_max_length)
+judge_target_length = reward_to_judge(reward_target_length)
+judge_vowel_proportion = reward_to_judge(reward_vowel_proportion)
 
 assert t.all(judge_periods(["This is a test.", "This is a test.", "This is a test."], ["This is a test", "This is a test..", "This. is a test."]) == t.tensor([True, False, False]))
 # %%
@@ -134,7 +146,7 @@ class DPOTrainingArgs():
     cuda: bool = t.cuda.is_available()
 
     # Wandb / logging
-    exp_name: str = "DPO_Implementation"
+    exp_name: str = "DPO"
     wandb_project_name: str | None = "capstone_dpo"
     wandb_entity: str | None = None  
     use_wandb: bool = True
@@ -169,7 +181,16 @@ class DPOTrainingArgs():
     implicit_reward_fn: Callable = reward_char_count
     normalize_reward: bool = False
 
-args = DPOTrainingArgs(judge_fn=judge_periods, implicit_reward_fn=reward_char_count)
+selected_judge_fn = judge_periods
+selected_implicit_reward_fn = reward_char_count
+
+judge_name: str = selected_implicit_reward_fn.__name__
+
+args = DPOTrainingArgs(
+    judge_fn=selected_judge_fn, 
+    implicit_reward_fn=selected_implicit_reward_fn,
+    exp_name=judge_name,
+)
 # %%
 def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     """
@@ -442,6 +463,7 @@ class DPOTrainer:
 
 # %%
 args.base_learning_rate = 3e-6
+args.dpo_beta = 0.2
 args.use_wandb = True
 trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
 trainer.train()
