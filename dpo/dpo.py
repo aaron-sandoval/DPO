@@ -89,8 +89,6 @@ class DPOModel(nn.Module):
     def load_model(cls, name: str, **kwargs):
         path = DATA_DIR / "models" / f"{name}.pt"
         return cls(model=path, **kwargs)
-
-
 dpo_model: DPOModel = DPOModel()
 ref_model: DPOModel = DPOModel(fp16=True)
 # %%
@@ -110,8 +108,9 @@ for ids, sample in zip(sample_ids, samples):
 rprint(table)
 # %%
 # Reward and judge functions: simulating human preferences
-def reward_char_count(sample: str, char: str = '.', *args, **kwargs) -> int:
-    return sample.count(char)
+def reward_char_count(sample: str, char: str = '.', *args, **kwargs) -> float:
+    """Add 0.01 to keep away from wandb histogram bucket edges."""
+    return sample.count(char) + 0.01
 
 def reward_up_to_max_length(sample: str, length: int = 150, *args, **kwargs) -> int:
     return len(sample) if len(sample) <= length else -1
@@ -136,6 +135,7 @@ judge_periods = reward_to_judge(reward_char_count, char='.')
 judge_up_to_max_length = reward_to_judge(reward_up_to_max_length)
 judge_target_length = reward_to_judge(reward_target_length)
 judge_vowel_proportion = reward_to_judge(reward_vowel_proportion)
+
 assert t.all(judge_periods(["This is a test.", "This is a test.", "This is a test."], ["This is a test", "This is a test..", "This. is a test."]) == t.tensor([True, False, False]))
 # %%
 
@@ -162,7 +162,7 @@ class DPOTrainingArgs():
     # Optimization hyperparameters
     base_learning_rate: float = 1e-6  # Rafailov et al. 2024
     # head_learning_rate: float = 5e-4
-    max_grad_norm: float = 1.0
+    # max_grad_norm: float = 1.0
     warmup_steps: int = 150  # Rafailov et al. 2024
     final_scale: float = 0.1
 
@@ -174,11 +174,19 @@ class DPOTrainingArgs():
 
     # Extra stuff for DPO
     dpo_beta: float = 0.1
+    judge_fn: Callable = judge_periods
+    implicit_reward_fn: Callable = reward_char_count
+    normalize_reward: bool = False
 
+selected_judge_fn = judge_periods
+selected_implicit_reward_fn = reward_char_count
+
+judge_name: str = selected_implicit_reward_fn.__name__
 
 args = DPOTrainingArgs(
-    judge_fn=judge_periods, 
-    implicit_reward_fn=reward_char_count,
+    judge_fn=selected_judge_fn, 
+    implicit_reward_fn=selected_implicit_reward_fn,
+    exp_name=judge_name,
 )
 # %%
 def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
@@ -186,6 +194,7 @@ def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     Returns an Adam optimizer for the model, with the correct learning rates for the base and head.
     """
     return t.optim.Adam(params=model.model.parameters(), lr = args.base_learning_rate)
+
 
 optimizer = get_optimizer(args, dpo_model)
 
@@ -352,12 +361,13 @@ class DPOTrainer:
             model: DPOModel, 
             dataloader: t.utils.data.DataLoader, 
             ref_model: Optional[DPOModel] = None,
+            args: DPOTrainingArgs = args,
             save_model: bool = True,
-            args: DPOTrainingArgs = args
         ):
         self.model = model
         self.dataloader = dataloader
         self.args = args
+        self.save_model = save_model
         if ref_model is None:
             self.ref_model = DPOModel(fp16=True)
         else:
@@ -390,8 +400,6 @@ class DPOTrainer:
                 "logprobs_rej_trained": logprobs_rej_trained,
                 "logprobs_pref_ref": logprobs_pref_ref,
                 "logprobs_rej_ref": logprobs_rej_ref,
-                # "pref_relative_logprob": logprobs_pref_trained - logprobs_pref_ref,
-                # "rej_relative_logprob": logprobs_rej_trained - logprobs_rej_ref,
             }, step=self.step)
         return loss
     
@@ -407,18 +415,15 @@ class DPOTrainer:
                 pref_strs: list[str] = [tokenizer.decode(ids) for ids in batch["preferred"]]
                 rej_strs: list[str] = [tokenizer.decode(ids) for ids in batch["rejected"]]
                 gen_rewards = t.tensor([self.implicit_reward_fn(gen_str) for gen_str in pref_strs+rej_strs], dtype=t.float16, requires_grad=False)
-                # pref_rewards: list[float] = [self.implicit_reward_fn(pref_str) for pref_str in pref_strs]
-                # rej_rewards: list[float] = [self.implicit_reward_fn(rej_str) for rej_str in rej_strs]
-                # all_rewards = t.tensor(pref_rewards + rej_rewards, requires_grad=False)
-                # avg_pref_reward: float = sum(pref_rewards) / len(pref_strs)
-                # avg_rej_reward: float = sum(rej_rewards) / len(rej_strs)
+                avg_pref_reward: float = sum(self.implicit_reward_fn(pref_str) for pref_str in pref_strs) / len(pref_strs)
+                avg_rej_reward: float = sum(self.implicit_reward_fn(rej_str) for rej_str in rej_strs) / len(rej_strs)
                 print(pref_strs[0])
                 wandb.log({
                     "reward": {
-                        # "mean_preferred": avg_pref_reward,
-                        # "mean_rejected": avg_rej_reward,
+                        "preferred": avg_pref_reward,
+                        "rejected": avg_rej_reward,
                         "mean": gen_rewards.mean().item(),
-                        "all": gen_rewards ,
+                        "all": gen_rewards,
                     },
                     "lr": self.scheduler.get_last_lr()[0],
                 }, step=self.step)
@@ -456,16 +461,16 @@ class DPOTrainer:
                 self._train()
             finally:
                 if self.save_model:
-                    self.model.save_model(suffix=f"_{self.judge_fn_name}_{self.step}")
+                    self.model.save_model()
                 wandb.finish()
         else:
             self._train()
-        
+            if self.save_model:
+                self.model.save_model()
 
 # %%
-args.base_learning_rate = 3e-6
-# args.final_scale = 0.2
-# args.dpo_beta = 0.2
+args.base_learning_rate = 4e-6
+args.dpo_beta = 0.2
 args.use_wandb = True
 trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
 trainer.train()
@@ -487,4 +492,3 @@ gen_tokens, gen_strings = dpo_model.generate(
         )
 print(gen_strings)
 # %%
-
