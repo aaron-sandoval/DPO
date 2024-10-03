@@ -41,16 +41,11 @@ tokenizer = GPT2Tokenizer.from_pretrained(BASE_MODEL)
 class DPOModel(nn.Module):
     def __init__(
             self, 
-            model: str = BASE_MODEL, 
-            tokenizer: GPT2Tokenizer=tokenizer,
-            fp16: bool = False,
+            model: GPT2LMHeadModel=GPT2LMHeadModel.from_pretrained(BASE_MODEL).to(device), 
+            tokenizer: GPT2Tokenizer=tokenizer
         ):
         super().__init__()
-        if fp16:
-            self.model = GPT2LMHeadModel.from_pretrained(model).half().to(device)
-        else:
-            
-            self.model = GPT2LMHeadModel.from_pretrained(model).to(device)
+        self.model = model
         self.tokenizer = tokenizer
         self.d_model: int = self.model.config.n_embd
         self.d_vocab: int = len(self.tokenizer)
@@ -93,7 +88,7 @@ class DPOModel(nn.Module):
 
 
 dpo_model: DPOModel = DPOModel()
-ref_model: DPOModel = DPOModel(fp16=True)
+ref_model: DPOModel = DPOModel()
 # %%
 
 sample_ids, samples = dpo_model.generate(
@@ -360,7 +355,7 @@ class DPOTrainer:
         self.dataloader = dataloader
         self.args = args
         if ref_model is None:
-            self.ref_model = DPOModel(fp16=True)
+            self.ref_model = DPOModel()
         else:
             self.ref_model = ref_model
         self.optimizer, self.scheduler = get_optimizer_and_scheduler(self.args, self.model)
@@ -475,17 +470,3 @@ if MAIN:
     print(dpo_model.generate("What is the capital of France?", batch_size=3))
 
 # %%
-def print_model_layer_dtype(model):
-    print('\nModel dtypes:')
-    for name, param in model.named_parameters():
-        print(f"Param: {name}\tdtype: {param.dtype}")
-# %%
-gen_tokens, gen_strings = dpo_model.generate(
-            on_the_fly_dataset.prompt,
-            gen_len=args.gen_len,
-            batch_size=4,
-            temperature=args.temperature,
-        )
-print(gen_strings)
-# %%
-
