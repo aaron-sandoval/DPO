@@ -1,6 +1,7 @@
 # %%
 import sys
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -26,6 +27,8 @@ from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 logging.set_verbosity_error()
 device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
 MAIN = __name__ == "__main__"
+ROOT = Path(__file__).parent.parent
+DATA_DIR = ROOT / "data"
 
 LOW_GPU_MEM = False
 BASE_MODEL = "gpt2" if LOW_GPU_MEM else "gpt2-medium"
@@ -73,6 +76,19 @@ class DPOModel(nn.Module):
         )
         return completion, [self.tokenizer.decode(c, skip_special_tokens=True) for c in completion]
 
+    def save_model(self, path: Optional[str] = None, suffix: Optional[str] = None):
+        if path is None:
+            path = DATA_DIR / "models"
+        if suffix is None:
+            suffix = ""
+        dt = datetime.now().isoformat(timespec='minutes').replace(':', '')
+        path = path / f"{dt}{suffix}.pt"
+        self.model.save_pretrained(path)
+
+    @classmethod
+    def load_model(cls, name: str, **kwargs):
+        path = DATA_DIR / "models" / f"{name}.pt"
+        return cls(model=path, **kwargs)
 dpo_model: DPOModel = DPOModel()
 ref_model: DPOModel = DPOModel(fp16=True)
 # %%
@@ -327,11 +343,13 @@ class DPOTrainer:
             model: DPOModel, 
             dataloader: t.utils.data.DataLoader, 
             ref_model: Optional[DPOModel] = None,
-            args: DPOTrainingArgs = args
+            args: DPOTrainingArgs = args,
+            save_model: bool = True,
         ):
         self.model = model
         self.dataloader = dataloader
         self.args = args
+        self.save_model = save_model
         if ref_model is None:
             self.ref_model = DPOModel(fp16=True)
         else:
@@ -414,10 +432,13 @@ class DPOTrainer:
             try:
                 self._train()
             finally:
+                if self.save_model:
+                    self.model.save_model()
                 wandb.finish()
         else:
             self._train()
-        
+            if self.save_model:
+                self.model.save_model()
 
 # %%
 args.base_learning_rate = 3e-6
