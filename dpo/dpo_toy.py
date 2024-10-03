@@ -1,12 +1,14 @@
+# %%
+import torch as t
 from transformers import GPT2Tokenizer
 from rich import print as rprint
 from rich.table import Table
-
 from dpo import (
     DPOModel,
     OnTheFlyBinaryPreferenceDataset,
     OnTheFlyDataLoader,
     DPOTrainingArgs,
+    DPOTrainer,
 )
 
 # %%
@@ -64,3 +66,9 @@ assert "preferred" in a and "rejected" in a and "prefix_len" in a
 assert len(a["preferred"]) == len(a["rejected"]) == len(a["prefix_len"]) == args.batch_size
 assert t.all(a["prefix_len"] == t.full((args.batch_size,), on_the_fly_dataset.prefix_len))
 # %%
+args.base_learning_rate = 4e-6
+args.warmup_steps = 50
+args.dpo_beta = 0.2
+args.use_wandb = True
+trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
+trainer.train()

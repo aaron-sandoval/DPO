@@ -105,9 +105,9 @@ def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) ->
     """
     Converts a reward function to a judge function.
     """
-    def judge_fn(samples0: Sequence[str], samples1: Sequence[str], tokenizer: PreTrainedTokenizer=tokenizer) -> Int[Tensor, "batch"]:
-        rewards0 = t.tensor([reward_fn(s, *args, tokenizer=tokenizer, **kwargs) for s in samples0], requires_grad=False)
-        rewards1 = t.tensor([reward_fn(s, *args, tokenizer=tokenizer, **kwargs) for s in samples1], requires_grad=False)
+    def judge_fn(samples0: Sequence[str], samples1: Sequence[str]) -> Int[Tensor, "batch"]:
+        rewards1 = t.tensor([reward_fn(s, *args, **kwargs) for s in samples1], requires_grad=False)
+        rewards0 = t.tensor([reward_fn(s, *args, **kwargs) for s in samples0], requires_grad=False)
         return rewards0 > rewards1
     return judge_fn
 
@@ -122,6 +122,8 @@ assert t.all(judge_periods(["This is a test.", "This is a test.", "This is a tes
 @dataclass
 class DPOTrainingArgs():
     # Judge and reward functions
+    base_model: str
+    tokenizer: Optional[PreTrainedTokenizer] = None
     judge_fn: Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]]
     implicit_reward_fn: Optional[Callable[[str], float | int]] = None
 
@@ -147,7 +149,6 @@ class DPOTrainingArgs():
     final_scale: float = 0.1
 
     # Base model & sampling arguments
-    base_model: str = BASE_MODEL
     gen_len: int = 30
     temperature: float = 0.6
     prefix: str = "This is"
@@ -158,6 +159,10 @@ class DPOTrainingArgs():
     implicit_reward_fn: Callable = reward_char_count
     normalize_reward: bool = False
 
+    def __post_init__(self):
+        if self.tokenizer is None:
+            self.tokenizer = PreTrainedTokenizer.from_pretrained(self.base_model)
+
 # %%
 def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     """
@@ -166,7 +171,7 @@ def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     return t.optim.Adam(params=model.model.parameters(), lr = args.base_learning_rate)
 
 
-# optimizer = get_optimizer(args, dpo_model)
+# optimizer =' get_optimizer(args, dpo_model)
 
 # %%
 def get_lr_scheduler(warmup_steps, total_steps, final_scale):
@@ -259,12 +264,12 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
         """
         self.prompt = prompt
         self.args = args
-        self.prefix_len = len(tokenizer(prompt)["input_ids"])
+        self.prefix_len = len(args.tokenizer(prompt)["input_ids"])
         self.implicit_reward_fn = args.implicit_reward_fn
         self.judge_fn = args.judge_fn
         self.gen_model = gen_model
         self.num_samples = args.train_length
-        self.encoded_prompt = tokenizer(self.prompt, return_tensors="pt").to(device)
+        self.encoded_prompt = args.tokenizer(self.prompt, return_tensors="pt").to(device)
         self.cache_batch_size = args.batch_size
         self.cache: list[tuple[Int[Tensor, "seq_len"], Int[Tensor, "seq_len"]]] = [0] * self.num_samples
 
@@ -295,7 +300,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
             batch_size=batch_size*2,
             temperature=temperature,
         )
-        preferred_index_0: Bool[Tensor, "batch"] = self.judge_fn(gen_strings[:batch_size], gen_strings[batch_size:], tokenizer=tokenizer)
+        preferred_index_0: Bool[Tensor, "batch"] = self.judge_fn(gen_strings[:batch_size], gen_strings[batch_size:], tokenizer=self.args.tokenizer)
         preferred_mask: Bool[Tensor, "2 batch"] = t.stack([preferred_index_0, ~preferred_index_0], dim=0).to(device)
         # Reshape gen_tokens into (2, batch_size, seq_len)
         gen_tokens_reshaped = einops.rearrange(gen_tokens, "(b1 b2) ... -> ... b1 b2", b1=2)
@@ -314,8 +319,8 @@ class DPOTrainer:
             self, 
             model: DPOModel, 
             dataloader: t.utils.data.DataLoader, 
+            args: DPOTrainingArgs,
             ref_model: Optional[DPOModel] = None,
-            args: DPOTrainingArgs = args,
             save_model: bool = True,
         ):
         self.model = model
@@ -323,7 +328,7 @@ class DPOTrainer:
         self.args = args
         self.save_model = save_model
         if ref_model is None:
-            self.ref_model = DPOModel(model=BASE_MODEL, fp16=True)
+            self.ref_model = DPOModel(model=args.base_model, fp16=True)
         else:
             self.ref_model = ref_model
         self.optimizer, self.scheduler = get_optimizer_and_scheduler(self.args, self.model)
@@ -366,8 +371,8 @@ class DPOTrainer:
                 #     gen_len=self.args.gen_len,
                 #     temperature=self.args.temperature,
                 # )
-                pref_strs: list[str] = [tokenizer.decode(ids) for ids in batch["preferred"]]
-                rej_strs: list[str] = [tokenizer.decode(ids) for ids in batch["rejected"]]
+                pref_strs: list[str] = [self.args.tokenizer.decode(ids) for ids in batch["preferred"]]
+                rej_strs: list[str] = [self.args.tokenizer.decode(ids) for ids in batch["rejected"]]
                 gen_rewards = t.tensor([self.implicit_reward_fn(gen_str) for gen_str in pref_strs+rej_strs], dtype=t.float16, requires_grad=False)
                 avg_pref_reward: float = sum(self.implicit_reward_fn(pref_str) for pref_str in pref_strs) / len(pref_strs)
                 avg_rej_reward: float = sum(self.implicit_reward_fn(rej_str) for rej_str in rej_strs) / len(rej_strs)
@@ -424,6 +429,13 @@ class DPOTrainer:
 
 # %%
 if MAIN:
+    args = DPOTrainingArgs(base_model="gpt2")
+    dpo_model = DPOModel(model=args.base_model)
+    ref_model = DPOModel(model=args.base_model, fp16=True)
+    on_the_fly_dataloader = t.utils.data.DataLoader(OnTheFlyBinaryPreferenceDataset(
+        args=args, 
+        gen_model=dpo_model
+    ))
     args.base_learning_rate = 4e-6
     args.warmup_steps = 50
     args.dpo_beta = 0.2

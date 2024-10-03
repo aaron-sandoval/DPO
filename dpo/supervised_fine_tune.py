@@ -1,12 +1,15 @@
 # %%
+from datetime import datetime
+
 import wandb
 from datasets import load_dataset
 from trl import SFTConfig, SFTTrainer
 
 from utils import device, DATA_DIR, SEED
 # %%
-sft_steps: int = 4000
+sft_steps: int = 8000
 model: str = "openai-community/gpt2-large"
+final_model_path = DATA_DIR / "models" / "sft" / f"{datetime.now().isoformat(timespec='minutes').replace(':', '')}_sftsteps={sft_steps}.pt"
 
 # Load the full dataset
 full_dataset = load_dataset("stanfordnlp/imdb", split="train")
@@ -40,5 +43,6 @@ try:
         args=sft_config,
     )
     trainer.train()
+    trainer.save_model(final_model_path)
 finally:
     wandb.finish()  
