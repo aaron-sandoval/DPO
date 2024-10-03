@@ -11,7 +11,6 @@ import einops
 import numpy as np
 import torch as t
 import torch.nn as nn
-from tqdm.auto import tqdm
 import wandb
 # from eindex import eindex
 from jaxtyping import Float, Int, Bool
@@ -24,7 +23,7 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer, PreTrainedTokenizer, lo
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
 
-logging.set_verbosity_error()
+logging.set_verbosity_warning()
 device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
 MAIN = __name__ == "__main__"
 ROOT = Path(__file__).parent.parent
@@ -52,7 +51,8 @@ class DPOModel(nn.Module):
             
             self.model = GPT2LMHeadModel.from_pretrained(model).to(device)
         self.tokenizer = tokenizer
-        self.model.generation_config.pad_token_id = tokenizer.pad_token_id
+        self.d_model: int = self.model.config.n_embd
+        self.d_vocab: int = len(self.tokenizer)
 
     def forward(self, input_ids: Int[Tensor, "batch seq_len"], **kwargs):
         return self.model(input_ids=input_ids, **kwargs).logits
@@ -153,7 +153,7 @@ class DPOTrainingArgs():
     exp_name: str = "DPO"
     wandb_project_name: str | None = "capstone_dpo"
     wandb_entity: str | None = None  
-    use_wandb: bool = True
+    use_wandb: bool = False
 
     # Duration of different phases
     train_length: int = 64*600
@@ -282,7 +282,6 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
         """
         self.prompt = prompt
         self.prefix_len = len(tokenizer(prompt)["input_ids"])
-        self.implicit_reward_fn = implicit_reward_fn
         self.judge_fn = judge_fn
         self.gen_model = gen_model
         self.num_samples = num_samples
