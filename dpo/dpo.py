@@ -150,7 +150,7 @@ class DPOTrainingArgs():
     cuda: bool = t.cuda.is_available()
 
     # Wandb / logging
-    exp_name: str = "DPO_Implementation"
+    exp_name: str = "DPO"
     wandb_project_name: str | None = "capstone_dpo"
     wandb_entity: str | None = None  
     use_wandb: bool = True
@@ -177,8 +177,8 @@ class DPOTrainingArgs():
 
 
 args = DPOTrainingArgs(
-    judge_fn=judge_vowel_proportion, 
-    implicit_reward_fn=reward_vowel_proportion,
+    judge_fn=judge_periods, 
+    implicit_reward_fn=reward_char_count,
 )
 # %%
 def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
@@ -269,7 +269,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
             prompt: str, 
             judge_fn: Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]],
             implicit_reward_fn: Optional[Callable[[str], float | int]] = None,
-            gen_model: DPOModel = ref_model, 
+            gen_model: DPOModel = dpo_model, 
             num_samples: int = args.train_length,
         ):
         """
