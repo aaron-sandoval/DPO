@@ -1,6 +1,7 @@
 # %%
 import sys
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -26,6 +27,8 @@ from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 logging.set_verbosity_error()
 device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
 MAIN = __name__ == "__main__"
+ROOT = Path(__file__).parent.parent
+DATA_DIR = ROOT / "data"
 
 LOW_GPU_MEM = False
 BASE_MODEL = "gpt2" if LOW_GPU_MEM else "gpt2-medium"
@@ -73,6 +76,21 @@ class DPOModel(nn.Module):
         )
         return completion, [self.tokenizer.decode(c, skip_special_tokens=True) for c in completion]
 
+    def save_model(self, path: Optional[str] = None, suffix: Optional[str] = None):
+        if path is None:
+            path = DATA_DIR / "models"
+        if suffix is None:
+            suffix = ""
+        dt = datetime.now().isoformat(timespec='minutes').replace(':', '')
+        path = path / f"{dt}{suffix}.pt"
+        self.model.save_pretrained(path)
+
+    @classmethod
+    def load_model(cls, name: str, **kwargs):
+        path = DATA_DIR / "models" / f"{name}.pt"
+        return cls(model=path, **kwargs)
+
+
 dpo_model: DPOModel = DPOModel()
 ref_model: DPOModel = DPOModel(fp16=True)
 # %%
@@ -95,6 +113,15 @@ rprint(table)
 def reward_char_count(sample: str, char: str = '.', *args, **kwargs) -> int:
     return sample.count(char)
 
+def reward_up_to_max_length(sample: str, length: int = 150, *args, **kwargs) -> int:
+    return len(sample) if len(sample) <= length else -1
+
+def reward_target_length(sample: str, length: int = 80, *args, **kwargs) -> int:
+    return - abs(length - len(sample))
+
+def reward_vowel_proportion(sample: str, *args, **kwargs) -> float:
+    return sum(c.lower() in "aeiou" for c in sample) / len(sample)
+
 def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) -> Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]]:
     """
     Converts a reward function to a judge function.
@@ -106,28 +133,31 @@ def reward_to_judge(reward_fn: Callable[[str], float | int], *args, **kwargs) ->
     return judge_fn
 
 judge_periods = reward_to_judge(reward_char_count, char='.')
-
+judge_up_to_max_length = reward_to_judge(reward_up_to_max_length)
+judge_target_length = reward_to_judge(reward_target_length)
+judge_vowel_proportion = reward_to_judge(reward_vowel_proportion)
 assert t.all(judge_periods(["This is a test.", "This is a test.", "This is a test."], ["This is a test", "This is a test..", "This. is a test."]) == t.tensor([True, False, False]))
 # %%
 
 @dataclass
 class DPOTrainingArgs():
-    # Basic / global
+    # Judge and reward functions
+    judge_fn: Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]]
+    implicit_reward_fn: Optional[Callable[[str], float | int]] = None
 
+    # Basic / global
     seed: int = 1
     cuda: bool = t.cuda.is_available()
 
     # Wandb / logging
-    exp_name: str = "DPO_Implementation"
+    exp_name: str = "DPO"
     wandb_project_name: str | None = "capstone_dpo"
     wandb_entity: str | None = None  
     use_wandb: bool = True
 
     # Duration of different phases
-    train_length: int = 64*500
+    train_length: int = 64*600
     batch_size: int = 64
-    # num_minibatches: int = 4
-    # batches_per_learning_phase: int = 2
 
     # Optimization hyperparameters
     base_learning_rate: float = 1e-6  # Rafailov et al. 2024
@@ -136,22 +166,20 @@ class DPOTrainingArgs():
     warmup_steps: int = 150  # Rafailov et al. 2024
     final_scale: float = 0.1
 
-    # Computing other PPO loss functions
-    # clip_coef: float = 0.2
-    # vf_coef: float = 0.15
-    # ent_coef: float = 0.001
-
     # Base model & sampling arguments
     base_model: str = BASE_MODEL
     gen_len: int = 30
     temperature: float = 0.6
     prefix: str = "This is"
 
-    # Extra stuff for RLHF
+    # Extra stuff for DPO
     dpo_beta: float = 0.1
-    reward_fn: Callable = judge_periods
-    normalize_reward: bool = False
 
+
+args = DPOTrainingArgs(
+    judge_fn=judge_periods, 
+    implicit_reward_fn=reward_char_count,
+)
 # %%
 def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     """
@@ -159,9 +187,6 @@ def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     """
     return t.optim.Adam(params=model.model.parameters(), lr = args.base_learning_rate)
 
-
-
-args = DPOTrainingArgs()
 optimizer = get_optimizer(args, dpo_model)
 
 # %%
@@ -244,7 +269,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
             prompt: str, 
             judge_fn: Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]],
             implicit_reward_fn: Optional[Callable[[str], float | int]] = None,
-            gen_model: DPOModel = ref_model, 
+            gen_model: DPOModel = dpo_model, 
             num_samples: int = args.train_length,
         ):
         """
@@ -304,8 +329,8 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
 # Create the on-the-fly dataset and dataloader
 on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
     prompt=args.prefix, 
-    judge_fn=judge_periods, 
-    implicit_reward_fn=reward_char_count,
+    judge_fn=args.judge_fn, 
+    implicit_reward_fn=args.implicit_reward_fn,
     gen_model=dpo_model, 
     num_samples=args.train_length
 )
@@ -327,6 +352,7 @@ class DPOTrainer:
             model: DPOModel, 
             dataloader: t.utils.data.DataLoader, 
             ref_model: Optional[DPOModel] = None,
+            save_model: bool = True,
             args: DPOTrainingArgs = args
         ):
         self.model = model
@@ -338,6 +364,8 @@ class DPOTrainer:
             self.ref_model = ref_model
         self.optimizer, self.scheduler = get_optimizer_and_scheduler(self.args, self.model)
         self.step = 0
+        self.save_model = save_model
+        self.judge_fn_name = self.args.judge_fn.__name__
         if hasattr(self.dataloader.dataset, "implicit_reward_fn"):
             self.implicit_reward_fn = self.dataloader.dataset.implicit_reward_fn
         else:
@@ -358,24 +386,41 @@ class DPOTrainer:
         if self.args.use_wandb:
             wandb.log({
                 "loss": loss,
-                "pref_relative_logprob": logprobs_pref_trained - logprobs_pref_ref,
-                "rej_relative_logprob": logprobs_rej_trained - logprobs_rej_ref,
+                "logprobs_pref_trained": logprobs_pref_trained,
+                "logprobs_rej_trained": logprobs_rej_trained,
+                "logprobs_pref_ref": logprobs_pref_ref,
+                "logprobs_rej_ref": logprobs_rej_ref,
+                # "pref_relative_logprob": logprobs_pref_trained - logprobs_pref_ref,
+                # "rej_relative_logprob": logprobs_rej_trained - logprobs_rej_ref,
             }, step=self.step)
         return loss
     
     def _train(self):
         for batch in tqdm(self.dataloader):
             if self.args.use_wandb and self.implicit_reward_fn is not None:
+                # _, gen_strings = self.model.generate(
+                #     self.dataloader.dataset.prompt, 
+                #     batch_size=self.args.batch_size, 
+                #     gen_len=self.args.gen_len,
+                #     temperature=self.args.temperature,
+                # )
                 pref_strs: list[str] = [tokenizer.decode(ids) for ids in batch["preferred"]]
                 rej_strs: list[str] = [tokenizer.decode(ids) for ids in batch["rejected"]]
-                avg_pref_reward: float = sum(self.implicit_reward_fn(pref_str) for pref_str in pref_strs) / len(pref_strs)
-                avg_rej_reward: float = sum(self.implicit_reward_fn(rej_str) for rej_str in rej_strs) / len(rej_strs)
+                gen_rewards = t.tensor([self.implicit_reward_fn(gen_str) for gen_str in pref_strs+rej_strs], dtype=t.float16, requires_grad=False)
+                # pref_rewards: list[float] = [self.implicit_reward_fn(pref_str) for pref_str in pref_strs]
+                # rej_rewards: list[float] = [self.implicit_reward_fn(rej_str) for rej_str in rej_strs]
+                # all_rewards = t.tensor(pref_rewards + rej_rewards, requires_grad=False)
+                # avg_pref_reward: float = sum(pref_rewards) / len(pref_strs)
+                # avg_rej_reward: float = sum(rej_rewards) / len(rej_strs)
                 print(pref_strs[0])
                 wandb.log({
                     "reward": {
-                        "preferred": avg_pref_reward,
-                        "rejected": avg_rej_reward
-                    }
+                        # "mean_preferred": avg_pref_reward,
+                        # "mean_rejected": avg_rej_reward,
+                        "mean": gen_rewards.mean().item(),
+                        "all": gen_rewards ,
+                    },
+                    "lr": self.scheduler.get_last_lr()[0],
                 }, step=self.step)
             self.optimizer.zero_grad()
             preferred_ids = batch["preferred"].to(device)
@@ -398,23 +443,29 @@ class DPOTrainer:
             self.step += 1
 
     def train(self):
+        self.model.train()
+        self.ref_model.eval()
         if self.args.use_wandb:
             wandb.init(
                 project=self.args.wandb_project_name,
                 entity=self.args.wandb_entity,
-                name=f"{self.args.exp_name}__{self.args.seed}__{int(time.time())}",
+                name=f"{self.args.exp_name}_seed={self.args.seed}_{datetime.now().isoformat(timespec='minutes').replace(':', '')}_{self.judge_fn_name}",
                 config=self.args,
             )
             try:
                 self._train()
             finally:
+                if self.save_model:
+                    self.model.save_model(suffix=f"_{self.judge_fn_name}_{self.step}")
                 wandb.finish()
         else:
             self._train()
         
 
 # %%
-args.base_learning_rate = 4e-6
+args.base_learning_rate = 3e-6
+# args.final_scale = 0.2
+# args.dpo_beta = 0.2
 args.use_wandb = True
 trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
 trainer.train()
@@ -436,3 +487,4 @@ gen_tokens, gen_strings = dpo_model.generate(
         )
 print(gen_strings)
 # %%
+
