@@ -156,7 +156,7 @@ class DPOTrainingArgs():
     use_wandb: bool = True
 
     # Duration of different phases
-    train_length: int = 64*600
+    train_length: int = 64*400
     batch_size: int = 64
 
     # Optimization hyperparameters
@@ -470,6 +470,7 @@ class DPOTrainer:
 
 # %%
 args.base_learning_rate = 4e-6
+args.warmup_steps = 50
 args.dpo_beta = 0.2
 args.use_wandb = True
 trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
