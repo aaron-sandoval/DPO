@@ -108,8 +108,9 @@ for ids, sample in zip(sample_ids, samples):
 rprint(table)
 # %%
 # Reward and judge functions: simulating human preferences
-def reward_char_count(sample: str, char: str = '.', *args, **kwargs) -> int:
-    return sample.count(char)
+def reward_char_count(sample: str, char: str = '.', *args, **kwargs) -> float:
+    """Add 0.01 to keep away from wandb histogram bucket edges."""
+    return sample.count(char) + 0.01
 
 def reward_up_to_max_length(sample: str, length: int = 150, *args, **kwargs) -> int:
     return len(sample) if len(sample) <= length else -1
@@ -462,7 +463,7 @@ class DPOTrainer:
                 self.model.save_model()
 
 # %%
-args.base_learning_rate = 3e-6
+args.base_learning_rate = 4e-6
 args.dpo_beta = 0.2
 args.use_wandb = True
 trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
