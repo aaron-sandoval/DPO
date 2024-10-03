@@ -15,8 +15,6 @@ from tqdm.auto import tqdm
 import wandb
 # from eindex import eindex
 from jaxtyping import Float, Int, Bool
-from rich import print as rprint
-from rich.table import Table
 from torch import Tensor
 import datasets
 from transformers import GPT2LMHeadModel, GPT2Tokenizer, PreTrainedTokenizer, logging
@@ -28,11 +26,9 @@ logging.set_verbosity_error()
 MAIN = __name__ == "__main__"
 
 
-LOW_GPU_MEM = False
-BASE_MODEL = "gpt2" if LOW_GPU_MEM else "gpt2-medium"
 
 # %%
-tokenizer = GPT2Tokenizer.from_pretrained(BASE_MODEL)
+
 
 # %%
 
@@ -89,23 +85,7 @@ class DPOModel(nn.Module):
     def load_model(cls, name: str, **kwargs):
         path = DATA_DIR / "models" / f"{name}.pt"
         return cls(model=path, **kwargs)
-dpo_model: DPOModel = DPOModel(model=BASE_MODEL)
-ref_model: DPOModel = DPOModel(model=BASE_MODEL, fp16=True)
-# %%
 
-sample_ids, samples = dpo_model.generate(
-    prompt="So long, and thanks for all the",
-    batch_size=5,
-    gen_len=20,
-    temperature=0.8,
-)
-
-table = Table("Token IDs", "Samples", title="Demo of `sample` function", show_lines=True)
-
-for ids, sample in zip(sample_ids, samples):
-    table.add_row(str(ids.tolist()), repr(sample))
-
-rprint(table)
 # %%
 # Reward and judge functions: simulating human preferences
 def reward_char_count(sample: str, char: str = '.', *args, **kwargs) -> float:
@@ -178,16 +158,6 @@ class DPOTrainingArgs():
     implicit_reward_fn: Callable = reward_char_count
     normalize_reward: bool = False
 
-selected_judge_fn = judge_periods
-selected_implicit_reward_fn = reward_char_count
-
-judge_name: str = selected_implicit_reward_fn.__name__
-
-args = DPOTrainingArgs(
-    judge_fn=selected_judge_fn, 
-    implicit_reward_fn=selected_implicit_reward_fn,
-    exp_name=judge_name,
-)
 # %%
 def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     """
@@ -196,7 +166,7 @@ def get_optimizer(args: DPOTrainingArgs, model: DPOModel) -> t.optim.Optimizer:
     return t.optim.Adam(params=model.model.parameters(), lr = args.base_learning_rate)
 
 
-optimizer = get_optimizer(args, dpo_model)
+# optimizer = get_optimizer(args, dpo_model)
 
 # %%
 def get_lr_scheduler(warmup_steps, total_steps, final_scale):
@@ -276,10 +246,8 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
     def __init__(
             self, 
             prompt: str, 
-            judge_fn: Callable[[Sequence[str], Sequence[str]], Bool[Tensor, "batch"]],
-            implicit_reward_fn: Optional[Callable[[str], float | int]] = None,
-            gen_model: DPOModel = dpo_model, 
-            num_samples: int = args.train_length,
+            args: DPOTrainingArgs,
+            gen_model: DPOModel, 
         ):
         """
         Args:
@@ -290,11 +258,12 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
             num_samples: The number of samples to generate.
         """
         self.prompt = prompt
+        self.args = args
         self.prefix_len = len(tokenizer(prompt)["input_ids"])
-        self.implicit_reward_fn = implicit_reward_fn
-        self.judge_fn = judge_fn
+        self.implicit_reward_fn = args.implicit_reward_fn
+        self.judge_fn = args.judge_fn
         self.gen_model = gen_model
-        self.num_samples = num_samples
+        self.num_samples = args.train_length
         self.encoded_prompt = tokenizer(self.prompt, return_tensors="pt").to(device)
         self.cache_batch_size = args.batch_size
         self.cache: list[tuple[Int[Tensor, "seq_len"], Int[Tensor, "seq_len"]]] = [0] * self.num_samples
@@ -314,10 +283,12 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
         self,
         batch_size: int,
         temperature: float = 1.0,
-        gen_len: int = args.gen_len,
+        gen_len: Optional[int] = None,
         device: t.device = device
     ) -> tuple[Int[Tensor, "batch seq_len"], Int[Tensor, "batch seq_len"]]:
         """Generate a batch of preferred and rejected completions using the reference model."""
+        if gen_len is None:
+            gen_len = self.args.gen_len
         gen_tokens, gen_strings = self.gen_model.generate(
             self.prompt,
             gen_len=gen_len,
@@ -335,25 +306,8 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
         rejected_tokens = einops.rearrange(rejected_tokens, "(seq batch) -> batch seq", batch=batch_size)
         return preferred_tokens, rejected_tokens
 
-# Create the on-the-fly dataset and dataloader
-on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
-    prompt=args.prefix, 
-    judge_fn=args.judge_fn, 
-    implicit_reward_fn=args.implicit_reward_fn,
-    gen_model=dpo_model, 
-    num_samples=args.train_length
-)
-on_the_fly_dataloader = t.utils.data.DataLoader(
-    on_the_fly_dataset,
-    batch_size=args.batch_size,
-)
 
-# a = on_the_fly_dataset.generate_preference_pairs(batch_size=4)
-a = next(iter(on_the_fly_dataloader))
-assert isinstance(a, dict)
-assert "preferred" in a and "rejected" in a and "prefix_len" in a
-assert len(a["preferred"]) == len(a["rejected"]) == len(a["prefix_len"]) == args.batch_size
-assert t.all(a["prefix_len"] == t.full((args.batch_size,), on_the_fly_dataset.prefix_len))
+
 # %%
 class DPOTrainer:
     def __init__(
