@@ -41,11 +41,15 @@ tokenizer = GPT2Tokenizer.from_pretrained(BASE_MODEL)
 class DPOModel(nn.Module):
     def __init__(
             self, 
-            model: GPT2LMHeadModel=GPT2LMHeadModel.from_pretrained(BASE_MODEL).to(device), 
-            tokenizer: GPT2Tokenizer=tokenizer
+            model: str = BASE_MODEL,
+            tokenizer: GPT2Tokenizer=tokenizer,
+            fp16: bool = False,
         ):
         super().__init__()
-        self.model = model
+        if fp16:
+            self.model = GPT2LMHeadModel.from_pretrained(model).half().to(device)
+        else:
+            self.model = GPT2LMHeadModel.from_pretrained(model).to(device)        
         self.tokenizer = tokenizer
         self.d_model: int = self.model.config.n_embd
         self.d_vocab: int = len(self.tokenizer)
