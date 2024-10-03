@@ -35,7 +35,7 @@ MAIN = __name__ == "__main__"
 class DPOModel(nn.Module):
     def __init__(
             self, 
-            model: str, 
+            model: str | Path,
             tokenizer: Optional[PreTrainedTokenizer] = None,
             fp16: bool = False,
         ):
@@ -300,7 +300,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
             batch_size=batch_size*2,
             temperature=temperature,
         )
-        preferred_index_0: Bool[Tensor, "batch"] = self.judge_fn(gen_strings[:batch_size], gen_strings[batch_size:], tokenizer=self.args.tokenizer)
+        preferred_index_0: Bool[Tensor, "batch"] = self.judge_fn(gen_strings[:batch_size], gen_strings[batch_size:])
         preferred_mask: Bool[Tensor, "2 batch"] = t.stack([preferred_index_0, ~preferred_index_0], dim=0).to(device)
         # Reshape gen_tokens into (2, batch_size, seq_len)
         gen_tokens_reshaped = einops.rearrange(gen_tokens, "(b1 b2) ... -> ... b1 b2", b1=2)

@@ -6,9 +6,10 @@ from rich.table import Table
 from dpo import (
     DPOModel,
     OnTheFlyBinaryPreferenceDataset,
-    OnTheFlyDataLoader,
     DPOTrainingArgs,
     DPOTrainer,
+    judge_periods,
+    reward_char_count,
 )
 
 # %%
@@ -16,8 +17,8 @@ LOW_GPU_MEM = False
 BASE_MODEL = "gpt2" if LOW_GPU_MEM else "gpt2-medium"
 # %%
 tokenizer = GPT2Tokenizer.from_pretrained(BASE_MODEL)
-dpo_model: DPOModel = DPOModel(model=BASE_MODEL)
-ref_model: DPOModel = DPOModel(model=BASE_MODEL, fp16=True)
+dpo_model: DPOModel = DPOModel(model=BASE_MODEL, tokenizer=tokenizer)
+ref_model: DPOModel = DPOModel(model=BASE_MODEL, tokenizer=tokenizer, fp16=True)
 # %%
 
 sample_ids, samples = dpo_model.generate(
@@ -41,6 +42,8 @@ selected_implicit_reward_fn = reward_char_count
 judge_name: str = selected_implicit_reward_fn.__name__
 
 args = DPOTrainingArgs(
+    base_model=BASE_MODEL,
+    tokenizer=tokenizer,
     judge_fn=selected_judge_fn, 
     implicit_reward_fn=selected_implicit_reward_fn,
     exp_name=judge_name,
@@ -50,10 +53,8 @@ args = DPOTrainingArgs(
 # Create the on-the-fly dataset and dataloader
 on_the_fly_dataset = OnTheFlyBinaryPreferenceDataset(
     prompt=args.prefix, 
-    judge_fn=args.judge_fn, 
-    implicit_reward_fn=args.implicit_reward_fn,
-    gen_model=dpo_model, 
-    num_samples=args.train_length
+    args=args,
+    gen_model=dpo_model,
 )
 on_the_fly_dataloader = t.utils.data.DataLoader(
     on_the_fly_dataset,
@@ -70,5 +71,5 @@ args.base_learning_rate = 4e-6
 args.warmup_steps = 50
 args.dpo_beta = 0.2
 args.use_wandb = True
-trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
+trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, args=args, ref_model=ref_model)
 trainer.train()
