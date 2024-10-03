@@ -91,7 +91,7 @@ class DPOModel(nn.Module):
         return cls(model=path, **kwargs)
 
 
-dpo_model: DPOModel = DPOModel()
+dpo_model: DPOModel = DPOModel.load_model("2024-10-02T1321judge_periods")
 ref_model: DPOModel = DPOModel()
 # %%
 
@@ -162,7 +162,7 @@ class DPOTrainingArgs():
     # Optimization hyperparameters
     base_learning_rate: float = 1e-6  # Rafailov et al. 2024
     # head_learning_rate: float = 5e-4
-    max_grad_norm: float = 1.0
+    # max_grad_norm: float = 1.0
     warmup_steps: int = 150  # Rafailov et al. 2024
     final_scale: float = 0.1
 
@@ -352,7 +352,7 @@ class DPOTrainer:
             model: DPOModel, 
             dataloader: t.utils.data.DataLoader, 
             ref_model: Optional[DPOModel] = None,
-            save_model: bool = True,
+            save_model: bool = False,
             args: DPOTrainingArgs = args
         ):
         self.model = model
