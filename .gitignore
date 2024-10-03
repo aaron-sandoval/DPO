@@ -169,6 +169,10 @@ cython_debug/
 
 # wandb
 dpo/wandb/
+wandb/
 
 # Potentially huge models
 *.safetensors
+data/models/sft/
+
+

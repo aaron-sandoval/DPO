@@ -22,7 +22,7 @@ import datasets
 from transformers import GPT2LMHeadModel, GPT2Tokenizer, PreTrainedTokenizer, logging
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
-from utils import device, DATA_DIR
+from utils import device, DATA_DIR, SEED
 
 logging.set_verbosity_error()
 MAIN = __name__ == "__main__"
@@ -144,7 +144,7 @@ class DPOTrainingArgs():
     implicit_reward_fn: Optional[Callable[[str], float | int]] = None
 
     # Basic / global
-    seed: int = 1
+    seed: int = SEED
     cuda: bool = t.cuda.is_available()
 
     # Wandb / logging
@@ -467,27 +467,12 @@ class DPOTrainer:
                 self.model.save_model()
 
 # %%
-args.base_learning_rate = 4e-6
-args.warmup_steps = 50
-args.dpo_beta = 0.2
-args.use_wandb = True
-trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
-trainer.train()
-# %%
 if MAIN:
-    print(dpo_model.generate("What is the capital of France?", batch_size=3))
+    args.base_learning_rate = 4e-6
+    args.warmup_steps = 50
+    args.dpo_beta = 0.2
+    args.use_wandb = True
+    trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
+    trainer.train()
 
-# %%
-def print_model_layer_dtype(model):
-    print('\nModel dtypes:')
-    for name, param in model.named_parameters():
-        print(f"Param: {name}\tdtype: {param.dtype}")
-# %%
-gen_tokens, gen_strings = dpo_model.generate(
-            on_the_fly_dataset.prompt,
-            gen_len=args.gen_len,
-            batch_size=4,
-            temperature=args.temperature,
-        )
-print(gen_strings)
 # %%
