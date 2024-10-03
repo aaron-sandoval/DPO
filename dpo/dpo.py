@@ -17,13 +17,14 @@ from jaxtyping import Float, Int, Bool
 from rich import print as rprint
 from rich.table import Table
 from torch import Tensor
+from tqdm.auto import tqdm
 import datasets
 from transformers import GPT2LMHeadModel, GPT2Tokenizer, PreTrainedTokenizer, logging
 # from transformers import pipeline, set_seed
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
 
-logging.set_verbosity_warning()
+logging.set_verbosity_error()
 device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
 MAIN = __name__ == "__main__"
 ROOT = Path(__file__).parent.parent
@@ -283,6 +284,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
         self.prompt = prompt
         self.prefix_len = len(tokenizer(prompt)["input_ids"])
         self.judge_fn = judge_fn
+        self.implicit_reward_fn = implicit_reward_fn
         self.gen_model = gen_model
         self.num_samples = num_samples
         self.encoded_prompt = tokenizer(self.prompt, return_tensors="pt").to(device)
@@ -368,7 +370,7 @@ class DPOTrainer:
         if hasattr(self.dataloader.dataset, "implicit_reward_fn"):
             self.implicit_reward_fn = self.dataloader.dataset.implicit_reward_fn
         else:
-            self.implicit_reward_fn = None
+            raise AttributeError("Dataset does not have an implicit reward function.")
 
     def dpo_loss(
             self, 
