@@ -20,13 +20,15 @@ from rich.table import Table
 from torch import Tensor
 import datasets
 from transformers import GPT2LMHeadModel, GPT2Tokenizer, PreTrainedTokenizer, logging
+# from transformers import pipeline, set_seed
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
-from utils import device, DATA_DIR
 
 logging.set_verbosity_error()
+device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.is_available() else 'cpu')
 MAIN = __name__ == "__main__"
-
+ROOT = Path(__file__).parent.parent
+DATA_DIR = ROOT / "data"
 
 LOW_GPU_MEM = False
 BASE_MODEL = "gpt2" if LOW_GPU_MEM else "gpt2-medium"
@@ -154,7 +156,7 @@ class DPOTrainingArgs():
     use_wandb: bool = True
 
     # Duration of different phases
-    train_length: int = 64*400
+    train_length: int = 64*600
     batch_size: int = 64
 
     # Optimization hyperparameters
@@ -468,7 +470,6 @@ class DPOTrainer:
 
 # %%
 args.base_learning_rate = 4e-6
-args.warmup_steps = 50
 args.dpo_beta = 0.2
 args.use_wandb = True
 trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, ref_model=ref_model)
