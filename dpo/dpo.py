@@ -1,6 +1,7 @@
 # %%
 import sys
 import time
+import random
 from datetime import datetime
 from dataclasses import dataclass, field
 from functools import partial
@@ -151,7 +152,7 @@ class DPOTrainingArgs():
     # Base model & sampling arguments
     gen_len: int = 30
     temperature: float = 0.6
-    prefix: str = "This is"
+    prefixes: list[str] = field(default_factory=lambda: ["This is"])
 
     # Extra stuff for DPO
     dpo_beta: float = 0.1
@@ -242,7 +243,17 @@ def get_correct_token_logprobs(
 
 # hf_dataset = datasets.load_dataset(hf_dataset_name, split="train")
 # train_dataloader = t.utils.data.DataLoader(hf_dataset, batch_size=args.batch_size, collate_fn=collate_prompt_integrated, shuffle=True)
+# %%
+class OnTheFlySentimentPairDataset(t.utils.data.Dataset):
+    def __init__(self, args: DPOTrainingArgs, gen_model: DPOModel, num_samples: int, prefixes: list[str]):
+        self.args = args
+        self.gen_model = gen_model
+        self.num_samples = num_samples
+        self.prefixes = prefixes
 
+    def __len__(self):
+        return len(self.dataset)
+        
     
 # %%
 # On the fly dataloader
@@ -295,7 +306,7 @@ class OnTheFlyBinaryPreferenceDataset(t.utils.data.Dataset):
         if gen_len is None:
             gen_len = self.args.gen_len
         gen_tokens, gen_strings = self.gen_model.generate(
-            self.prompt,
+            random.sample(self.args.prefixes, 1)[0],
             gen_len=gen_len,
             batch_size=batch_size*2,
             temperature=temperature,
