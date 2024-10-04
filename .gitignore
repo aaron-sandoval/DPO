@@ -174,5 +174,6 @@ wandb/
 # Potentially huge models
 *.safetensors
 data/models/sft/
+# !data/models/sft/
 
 

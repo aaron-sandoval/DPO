@@ -30,7 +30,7 @@ from sentiment_judge import make_preference_pairs, judge_sentiment
 # %%
 BASE_MODEL = "gpt2-large"
 sft_model_path = DATA_DIR / "models" / "sft" / "2024-10-03T1630_4000.pt"
-LOAD_PAIRS_DATASET = False #DATA_DIR / "pair_data" / "2024-10-04T1520.pkl"
+LOAD_PAIRS_DATASET = False # DATA_DIR / "pair_data" / "2024-10-04T1549.pkl"
 # %%
 tokenizer = GPT2Tokenizer.from_pretrained(BASE_MODEL)
 
@@ -51,7 +51,7 @@ prefixes = [
     "Everyone says ",
 ]
 count_positive, count_negative = 0, 0
-num_generations = 64*2
+num_generations = 64*100
 batch_size = 64
 gen_len = 100
 
@@ -100,7 +100,7 @@ args.use_wandb = True
 # %%
 if LOAD_PAIRS_DATASET:
     with open(LOAD_PAIRS_DATASET, "rb") as f:
-        pairs_data = pickle.loads(f)
+        pairs_data = pickle.load(f)
     on_the_fly_dataset = OnTheFlySentimentPairDataset(
         prefixes=prefixes, 
         args=args,
@@ -122,7 +122,7 @@ on_the_fly_dataloader = t.utils.data.DataLoader(
 )
 # a = on_the_fly_dataset.generate_preference_pairs(batch_size=4)
 a = next(iter(on_the_fly_dataloader))
-assert isinstance(a, tuple)
+# assert isinstance(a, tuple)
 # assert isinstance(a[0], str) and isinstance(a[1], str)
 assert "preferred" in a and "rejected" in a and "prefix_len" in a
 assert len(a["preferred"]) == len(a["rejected"]) == len(a["prefix_len"]) == args.batch_size

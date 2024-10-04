@@ -263,7 +263,7 @@ class OnTheFlySentimentPairDataset(t.utils.data.Dataset):
         return self.num_samples
     
     def __getitem__(self, idx):
-        return self.dataser[idx]
+        return self.dataset[idx]
 
     def generate_and_append_preference_pairs(
             self, 
@@ -283,10 +283,10 @@ class OnTheFlySentimentPairDataset(t.utils.data.Dataset):
                 batch_size=num_generations_per_prefix,
                 gen_len=self.args.gen_len,
             )
-            prefix_len = len(self.args.tokenizer.decode(prefix)["input_ids"])
+            prefix_len = len(self.args.tokenizer.encode(prefix))
             pairs = make_preference_pairs(completions)
             # Convert completions into preference pairs
-            self.dataset.extend([{"preferred": p[0], "rejected": pairs[1], "prefix_len": prefix_len} for p in pairs])
+            self.dataset.extend([{"preferred": p[0], "rejected": p[1], "prefix_len": prefix_len} for p in pairs])
 
 
         
