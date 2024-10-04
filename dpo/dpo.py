@@ -22,6 +22,7 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer, PreTrainedTokenizer, lo
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
 from utils import device, DATA_DIR, SEED
+from sentiment_judge import make_preference_pairs
 
 logging.set_verbosity_error()
 MAIN = __name__ == "__main__"
@@ -245,14 +246,49 @@ def get_correct_token_logprobs(
 # train_dataloader = t.utils.data.DataLoader(hf_dataset, batch_size=args.batch_size, collate_fn=collate_prompt_integrated, shuffle=True)
 # %%
 class OnTheFlySentimentPairDataset(t.utils.data.Dataset):
-    def __init__(self, args: DPOTrainingArgs, gen_model: DPOModel, num_samples: int, prefixes: list[str]):
+    def __init__(self, args: DPOTrainingArgs, gen_model: Optional[DPOModel], prefixes: Optional[list[str]], dataset: Optional[list[tuple[str]]] = None):
         self.args = args
-        self.gen_model = gen_model
-        self.num_samples = num_samples
-        self.prefixes = prefixes
+        if dataset is None:
+            self.num_samples = args.train_length
+            self.gen_model = gen_model
+            self.prefixes = prefixes
+            self.dataset = []
+            while len(self.dataset) < self.num_samples:
+                self.generate_and_append_preference_pairs()
+        else:
+            self.dataset = dataset
+            self.num_samples = len(self.dataset)
 
     def __len__(self):
-        return len(self.dataset)
+        return self.num_samples
+    
+    def __getitem__(self, idx):
+        return self.dataser[idx]
+
+    def generate_and_append_preference_pairs(
+            self, 
+            num_pairs_to_append: int = 24, 
+            num_generations_per_prefix = 4) -> None:
+        """
+        Generates a batch of preference pairs and appends them to the dataset.
+        """
+        # Select subset of prefixes
+        n_prefixes = num_pairs_to_append // (num_generations_per_prefix * (num_generations_per_prefix - 1) // 2)
+        prefixes = random.sample(self.prefixes, n_prefixes)
+
+        for prefix in prefixes:
+            # Generate completions
+            _, completions = self.gen_model.generate(
+                prefix,
+                batch_size=num_generations_per_prefix,
+                gen_len=self.args.gen_len,
+            )
+            prefix_len = len(self.args.tokenizer.decode(prefix)["input_ids"])
+            pairs = make_preference_pairs(completions)
+            # Convert completions into preference pairs
+            self.dataset.extend([{"preferred": p[0], "rejected": pairs[1], "prefix_len": prefix_len} for p in pairs])
+
+
         
     
 # %%
