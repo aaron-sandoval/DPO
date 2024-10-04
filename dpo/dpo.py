@@ -20,7 +20,6 @@ from rich.table import Table
 from torch import Tensor
 import datasets
 from transformers import GPT2LMHeadModel, GPT2Tokenizer, PreTrainedTokenizer, logging
-# from transformers import pipeline, set_seed
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
 
