@@ -201,7 +201,7 @@ def get_optimizer_and_scheduler(args: DPOTrainingArgs, model: DPOModel):
 def get_correct_token_logprobs(
     logits: Float[Tensor, "batch seq_len vocab"],
     tokens: Int[Tensor, "batch seq_len"],
-    prefix_len: int | None = None,
+    prefix_len: int | Int[Tensor, "batch"] | None = None,
 ) -> Float[Tensor, "batch gen_len"]:
     """
     Returns correct logprobs for the given logits and tokens, for all the tokens
@@ -212,7 +212,8 @@ def get_correct_token_logprobs(
     all tokens after the prefix tokens.
     """
     # Using no prefix_len argument is equivalent to prefix_len=1
-    prefix_len = prefix_len or 1
+    if prefix_len is None:
+        prefix_len = 1
 
     # Slice logprobs and tokens, so that each logprob matches up with the token which it predicts
     logprobs = logits[:, prefix_len - 1 : -1].log_softmax(-1)

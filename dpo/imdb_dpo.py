@@ -29,8 +29,8 @@ from sentiment_judge import make_preference_pairs, judge_sentiment
 
 # %%
 BASE_MODEL = "gpt2-large"
-sft_model_path = DATA_DIR / "models" / "sft" / "2024-10-03T1630_4000.pt"
-LOAD_PAIRS_DATASET = False # DATA_DIR / "pair_data" / "2024-10-04T1549.pkl"
+sft_model_path = "xtremekiwi/gpt2-large_sft-imdb4k"
+LOAD_PAIRS_DATASET = DATA_DIR / "pair_data" / "2024-10-04T1758.pkl"
 # %%
 tokenizer = GPT2Tokenizer.from_pretrained(BASE_MODEL)
 
@@ -96,7 +96,6 @@ args = DPOTrainingArgs(
 args.base_learning_rate = 4e-6
 args.warmup_steps = 50
 args.dpo_beta = 0.2
-args.use_wandb = True
 # %%
 if LOAD_PAIRS_DATASET:
     with open(LOAD_PAIRS_DATASET, "rb") as f:
@@ -173,7 +172,7 @@ class DPOTrainer:
     
     def _train(self):
         for batch in tqdm(self.dataloader):
-            if self.args.use_wandb and self.implicit_reward_fn is not None:
+            if self.args.use_wandb:
                 # _, gen_strings = self.model.generate(
                 #     self.dataloader.dataset.prompt, 
                 #     batch_size=self.args.batch_size, 
@@ -182,7 +181,7 @@ class DPOTrainer:
                 # )
                 pref_strs: list[str] = [self.args.tokenizer.decode(ids) for ids in batch["preferred"]]
                 rej_strs: list[str] = [self.args.tokenizer.decode(ids) for ids in batch["rejected"]]
-                gen_rewards = t.tensor([self.implicit_reward_fn(gen_str) for gen_str in pref_strs+rej_strs], dtype=t.float16, requires_grad=False)
+                # gen_rewards = t.tensor([self.implicit_reward_fn(gen_str) for gen_str in pref_strs+rej_strs], dtype=t.float16, requires_grad=False)
                 avg_pref_reward: float = sum(self.implicit_reward_fn(pref_str) for pref_str in pref_strs) / len(pref_strs)
                 avg_rej_reward: float = sum(self.implicit_reward_fn(rej_str) for rej_str in rej_strs) / len(rej_strs)
                 print(pref_strs[0])
@@ -190,25 +189,25 @@ class DPOTrainer:
                     "reward": {
                         "preferred": avg_pref_reward,
                         "rejected": avg_rej_reward,
-                        "mean": gen_rewards.mean().item(),
-                        "all": gen_rewards,
+                        # "mean": gen_rewards.mean().item(),
+                        # "all": gen_rewards,
                     },
                     "lr": self.scheduler.get_last_lr()[0],
                 }, step=self.step)
             self.optimizer.zero_grad()
             preferred_ids = batch["preferred"].to(device)
             rejected_ids = batch["rejected"].to(device)
-            prefix_len = batch["prefix_len"][0].item()
-            assert t.all(batch["prefix_len"] == prefix_len)
+            prefix_lens = batch["prefix_len"]
+            # assert t.all(batch["prefix_len"] == prefix_lens)
             preferred_logits = self.model(preferred_ids)
             rejected_logits = self.model(rejected_ids)
-            preferred_logprobs = get_correct_token_logprobs(preferred_logits, preferred_ids, prefix_len=prefix_len)
-            rejected_logprobs = get_correct_token_logprobs(rejected_logits, rejected_ids, prefix_len=prefix_len)
+            preferred_logprobs = get_correct_token_logprobs(preferred_logits, preferred_ids, prefix_len=prefix_lens)
+            rejected_logprobs = get_correct_token_logprobs(rejected_logits, rejected_ids, prefix_len=prefix_lens)
             with t.inference_mode():
                 preferred_ref_logits = self.ref_model(preferred_ids)
                 rejected_ref_logits = self.ref_model(rejected_ids)
-            preferred_ref_logprobs = get_correct_token_logprobs(preferred_ref_logits, preferred_ids, prefix_len=prefix_len)
-            rejected_ref_logprobs = get_correct_token_logprobs(rejected_ref_logits, rejected_ids, prefix_len=prefix_len)
+            preferred_ref_logprobs = get_correct_token_logprobs(preferred_ref_logits, preferred_ids, prefix_len=prefix_lens)
+            rejected_ref_logprobs = get_correct_token_logprobs(rejected_ref_logits, rejected_ids, prefix_len=prefix_lens)
             loss = self.dpo_loss(preferred_logprobs, rejected_logprobs, preferred_ref_logprobs, rejected_ref_logprobs)
             loss.backward()
             self.optimizer.step()
@@ -222,7 +221,7 @@ class DPOTrainer:
             wandb.init(
                 project=self.args.wandb_project_name,
                 entity=self.args.wandb_entity,
-                name=f"{self.args.exp_name}_seed={self.args.seed}_{datetime.now().isoformat(timespec='minutes').replace(':', '')}_{self.judge_fn_name}",
+                name=f"{self.args.exp_name}_seed={self.args.seed}_{datetime.now().isoformat(timespec='minutes').replace(':', '')}",
                 config=self.args,
             )
             try:
@@ -239,5 +238,6 @@ class DPOTrainer:
 # %%
 trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, args=args, ref_model=ref_model)
 # %%
+args.use_wandb = False
 trainer.train()
 # %%
