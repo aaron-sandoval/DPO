@@ -7,3 +7,4 @@ device = t.device('mps' if t.backends.mps.is_available() else 'cuda' if t.cuda.i
 ROOT = Path(__file__).parent.parent
 DATA_DIR = ROOT / "data"
 SEED: int = 1
+LOW_GPU_MEM = device == t.device("cpu")

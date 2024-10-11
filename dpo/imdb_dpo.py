@@ -13,23 +13,24 @@ from jaxtyping import Float, Int, Bool
 from transformers import GPT2Tokenizer
 from tqdm.auto import tqdm
 
-from utils import DATA_DIR, device, SEED
+from utils import DATA_DIR, device, SEED, LOW_GPU_MEM
 from dpo import (
     DPOModel,
     OnTheFlyBinaryPreferenceDataset,
     OnTheFlySentimentPairDataset,
     DPOTrainingArgs,
-    DPOTrainer,
+    DPOIMDBTrainer,
     judge_periods, 
     reward_char_count,
     get_correct_token_logprobs,
     get_optimizer_and_scheduler,
+    get_correct_token_logprobs_variable_prefix,
 )
 from sentiment_judge import make_preference_pairs, judge_sentiment
 
 # %%
 BASE_MODEL = "gpt2-large"
-sft_model_path = "xtremekiwi/gpt2-large_sft-imdb4k"
+sft_model_path = "gpt2" if LOW_GPU_MEM else "xtremekiwi/gpt2-large_sft-imdb4k"
 LOAD_PAIRS_DATASET = DATA_DIR / "pair_data" / "2024-10-04T1758.pkl"
 # %%
 tokenizer = GPT2Tokenizer.from_pretrained(BASE_MODEL)
@@ -125,9 +126,9 @@ a = next(iter(on_the_fly_dataloader))
 # assert isinstance(a[0], str) and isinstance(a[1], str)
 assert "preferred" in a and "rejected" in a and "prefix_len" in a
 assert len(a["preferred"]) == len(a["rejected"]) == len(a["prefix_len"]) == args.batch_size
-assert t.all(a["prefix_len"] == t.full((args.batch_size,), on_the_fly_dataset.prefix_len))
+# assert t.all(a["prefix_len"] == t.full((args.batch_size,), on_the_fly_dataset.prefix_len))
 # %%
-class DPOTrainer:
+class DPOIMDBTrainer:
     def __init__(
             self, 
             model: DPOModel, 
@@ -195,19 +196,30 @@ class DPOTrainer:
                     "lr": self.scheduler.get_last_lr()[0],
                 }, step=self.step)
             self.optimizer.zero_grad()
-            preferred_ids = batch["preferred"].to(device)
-            rejected_ids = batch["rejected"].to(device)
+            # Encode the preferred IDs
+            preferred_encoded_ids = [t.tensor(self.args.tokenizer.encode(s)) for s in batch["preferred"]]
+
+            # Pad the sequences
+            preferred_padded_ids =  t.nn.utils.rnn.pad_sequence(preferred_encoded_ids, batch_first=True, padding_value=self.args.tokenizer.eos_token_id)
+            # Move the padded sequences to the device
+            preferred_ids = preferred_padded_ids.to(device)
+            
+            # Encode the rejected IDs
+            rejected_encoded_ids = [t.tensor(self.args.tokenizer.encode(s)) for s in batch["rejected"]]
+            rejected_padded_ids =  t.nn.utils.rnn.pad_sequence(rejected_encoded_ids, batch_first=True, padding_value=self.args.tokenizer.eos_token_id)
+            rejected_ids = rejected_padded_ids.to(device)
+            
             prefix_lens = batch["prefix_len"]
             # assert t.all(batch["prefix_len"] == prefix_lens)
             preferred_logits = self.model(preferred_ids)
             rejected_logits = self.model(rejected_ids)
-            preferred_logprobs = get_correct_token_logprobs(preferred_logits, preferred_ids, prefix_len=prefix_lens)
-            rejected_logprobs = get_correct_token_logprobs(rejected_logits, rejected_ids, prefix_len=prefix_lens)
+            preferred_logprobs = get_correct_token_logprobs_variable_prefix(preferred_logits, preferred_ids, prefix_len=prefix_lens)
+            rejected_logprobs = get_correct_token_logprobs_variable_prefix(rejected_logits, rejected_ids, prefix_len=prefix_lens)
             with t.inference_mode():
                 preferred_ref_logits = self.ref_model(preferred_ids)
                 rejected_ref_logits = self.ref_model(rejected_ids)
-            preferred_ref_logprobs = get_correct_token_logprobs(preferred_ref_logits, preferred_ids, prefix_len=prefix_lens)
-            rejected_ref_logprobs = get_correct_token_logprobs(rejected_ref_logits, rejected_ids, prefix_len=prefix_lens)
+            preferred_ref_logprobs = get_correct_token_logprobs_variable_prefix(preferred_ref_logits, preferred_ids, prefix_len=prefix_lens)
+            rejected_ref_logprobs = get_correct_token_logprobs_variable_prefix(rejected_ref_logits, rejected_ids, prefix_len=prefix_lens)
             loss = self.dpo_loss(preferred_logprobs, rejected_logprobs, preferred_ref_logprobs, rejected_ref_logprobs)
             loss.backward()
             self.optimizer.step()
@@ -236,7 +248,7 @@ class DPOTrainer:
                 self.model.save_model()
 
 # %%
-trainer = DPOTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, args=args, ref_model=ref_model)
+trainer = DPOIMDBTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, args=args, ref_model=ref_model)
 # %%
 args.use_wandb = False
 trainer.train()

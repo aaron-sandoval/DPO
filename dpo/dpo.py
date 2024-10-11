@@ -201,7 +201,7 @@ def get_optimizer_and_scheduler(args: DPOTrainingArgs, model: DPOModel):
 def get_correct_token_logprobs(
     logits: Float[Tensor, "batch seq_len vocab"],
     tokens: Int[Tensor, "batch seq_len"],
-    prefix_len: int | Int[Tensor, "batch"] | None = None,
+    prefix_len: int | None = None,
 ) -> Float[Tensor, "batch gen_len"]:
     """
     Returns correct logprobs for the given logits and tokens, for all the tokens
@@ -212,8 +212,7 @@ def get_correct_token_logprobs(
     all tokens after the prefix tokens.
     """
     # Using no prefix_len argument is equivalent to prefix_len=1
-    if prefix_len is None:
-        prefix_len = 1
+    prefix_len = prefix_len or 1
 
     # Slice logprobs and tokens, so that each logprob matches up with the token which it predicts
     logprobs = logits[:, prefix_len - 1 : -1].log_softmax(-1)
@@ -225,6 +224,24 @@ def get_correct_token_logprobs(
 
     assert correct_logprobs.shape == (tokens.shape[0], tokens.shape[1] - prefix_len)
     return correct_logprobs
+
+
+def get_correct_token_logprobs_variable_prefix(
+        logits: Float[Tensor, "batch seq_len vocab"],
+        tokens: Int[Tensor, "batch seq_len"],
+        gen_len: int,
+        prefix_len: Optional[int | Int[Tensor, "batch"]] = None,
+    ) -> Float[Tensor, "batch gen_len"]:
+    """Same as `get_correct_token_logprobs`, but supports batches with variable prefix length.
+    
+    Must still have constant generation length
+    """
+    if prefix_len is None:
+        prefix_len = t.ones_like(tokens[:, 0])
+    elif isinstance(prefix_len, int):
+        prefix_len = t.full_like(tokens[:, 0], prefix_len)
+    logprobs = logits[:, prefix_len - 1 : prefix_len + gen_len - 1].log_softmax(-1)
+
 
 # %%
 # HF Dataset
