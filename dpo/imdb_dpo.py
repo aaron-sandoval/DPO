@@ -19,7 +19,6 @@ from dpo import (
     OnTheFlyBinaryPreferenceDataset,
     OnTheFlySentimentPairDataset,
     DPOTrainingArgs,
-    DPOIMDBTrainer,
     judge_periods, 
     reward_char_count,
     get_correct_token_logprobs,
@@ -213,13 +212,13 @@ class DPOIMDBTrainer:
             # assert t.all(batch["prefix_len"] == prefix_lens)
             preferred_logits = self.model(preferred_ids)
             rejected_logits = self.model(rejected_ids)
-            preferred_logprobs = get_correct_token_logprobs_variable_prefix(preferred_logits, preferred_ids, prefix_len=prefix_lens)
-            rejected_logprobs = get_correct_token_logprobs_variable_prefix(rejected_logits, rejected_ids, prefix_len=prefix_lens)
+            preferred_logprobs = get_correct_token_logprobs_variable_prefix(preferred_logits, preferred_ids, gen_len=self.args.gen_len, prefix_len=prefix_lens)
+            rejected_logprobs = get_correct_token_logprobs_variable_prefix(rejected_logits, rejected_ids, gen_len=self.args.gen_len, prefix_len=prefix_lens)
             with t.inference_mode():
                 preferred_ref_logits = self.ref_model(preferred_ids)
                 rejected_ref_logits = self.ref_model(rejected_ids)
-            preferred_ref_logprobs = get_correct_token_logprobs_variable_prefix(preferred_ref_logits, preferred_ids, prefix_len=prefix_lens)
-            rejected_ref_logprobs = get_correct_token_logprobs_variable_prefix(rejected_ref_logits, rejected_ids, prefix_len=prefix_lens)
+            preferred_ref_logprobs = get_correct_token_logprobs_variable_prefix(preferred_ref_logits, preferred_ids, gen_len=self.args.gen_len, prefix_len=prefix_lens)
+            rejected_ref_logprobs = get_correct_token_logprobs_variable_prefix(rejected_ref_logits, rejected_ids, gen_len=self.args.gen_len, prefix_len=prefix_lens)
             loss = self.dpo_loss(preferred_logprobs, rejected_logprobs, preferred_ref_logprobs, rejected_ref_logprobs)
             loss.backward()
             self.optimizer.step()

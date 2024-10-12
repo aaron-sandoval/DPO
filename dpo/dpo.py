@@ -233,14 +233,31 @@ def get_correct_token_logprobs_variable_prefix(
         prefix_len: Optional[int | Int[Tensor, "batch"]] = None,
     ) -> Float[Tensor, "batch gen_len"]:
     """Same as `get_correct_token_logprobs`, but supports batches with variable prefix length.
-    
-    Must still have constant generation length
     """
     if prefix_len is None:
         prefix_len = t.ones_like(tokens[:, 0])
     elif isinstance(prefix_len, int):
         prefix_len = t.full_like(tokens[:, 0], prefix_len)
-    logprobs = logits[:, prefix_len - 1 : prefix_len + gen_len - 1].log_softmax(-1)
+    
+    # Create a range tensor for the generation length
+    range_tensor = t.arange(gen_len, device=logits.device).unsqueeze(0)
+    
+    # Compute indices to gather
+    gather_indices = prefix_len.unsqueeze(1) + range_tensor - 1
+
+    # Use gather to collect the relevant logits
+    gathered_logits = t.gather(logits, 1, gather_indices.unsqueeze(-1).expand(-1, -1, logits.size(-1)))
+    
+    # Compute log softmax over the vocab dimension
+    gathered_logprobs = gathered_logits.log_softmax(-1)
+    
+    # Index into tokens to get the correct tokens
+    correct_tokens = t.gather(tokens, 1, gather_indices + 1)
+    
+    # We only want the logprobs of the correct tokens
+    correct_logprobs = t.gather(gathered_logprobs, 2, correct_tokens.unsqueeze(-1)).squeeze(-1)
+
+    return correct_logprobs
 
 
 # %%
