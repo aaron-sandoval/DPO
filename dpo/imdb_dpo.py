@@ -37,7 +37,6 @@ tokenizer = GPT2Tokenizer.from_pretrained(BASE_MODEL)
 dpo_model: DPOModel = DPOModel(model=sft_model_path, tokenizer=tokenizer)
 ref_model: DPOModel = DPOModel(model=sft_model_path, tokenizer=tokenizer, fp16=True)
 # %%
-# Baseline SFT generations and scoring
 prefixes = [
     "The movie was ",
     "This is a story ",
@@ -50,21 +49,36 @@ prefixes = [
     "This movie ",
     "Everyone says ",
 ]
-count_positive, count_negative = 0, 0
-num_generations = 64*100
-batch_size = 64
-gen_len = 100
+@dataclass
+class DPOIMDBTrainingArgs(DPOTrainingArgs):
+    eval_batches: int = 5
+    train_batches_per_eval: int = 10
 
-def generate_and_judge(
+args = DPOIMDBTrainingArgs(
+    base_model=BASE_MODEL,
+    tokenizer=tokenizer,
+    train_length=64*10,
+    # gen_len = 100,
+    batch_size=64,
+    exp_name="IMDB DPO",
+    prefixes=prefixes,
+    base_learning_rate=4e-6,
+    warmup_steps=50,
+    dpo_beta=0.2,
+)
+# %%
+def evaluate_generation_sentiment(
         model: DPOModel, 
-        prefixes: list[str], 
-        num_generations: int = num_generations,
-        batch_size: int = batch_size, 
-        gen_len: int = gen_len,
+        prefixes: list[str] = prefixes, 
+        num_batches: int = 5, 
+        batch_size: int = 64, 
+        gen_len: int = 100
     ) -> tuple[int, int]:
-    assert num_generations % batch_size == 0
+    """
+    Evaluate the sentiment of generations from a model.
+    """
     count_positive, count_negative = 0, 0
-    for _ in range(num_generations // batch_size):
+    for _ in range(num_batches):
         _, generations = model.generate(
             random.sample(prefixes, 1)[0],
             batch_size=batch_size,
@@ -74,28 +88,15 @@ def generate_and_judge(
         count_positive += t.sum(judgments > 0).item()
         count_negative += t.sum(judgments <= 0).item()
     return count_positive, count_negative
+        
 
 # %%
+# Baseline SFT generations and scoring
 # sft_count_positive, sft_count_negative = generate_and_judge(dpo_model, prefixes, num_generations, batch_size, gen_len)
 # print(f"Positive judgments: {sft_count_positive}/{num_generations}")
 # print(f"Negative judgments: {sft_count_negative}/{num_generations}")
 # print(f"Positive proportion: {sft_count_positive / num_generations}")
 
-# %%
-args = DPOTrainingArgs(
-    base_model=BASE_MODEL,
-    tokenizer=tokenizer,
-    train_length=batch_size*10,
-    # gen_len = 100,
-    batch_size=batch_size,
-    judge_fn=judge_periods, 
-    implicit_reward_fn=reward_char_count,
-    exp_name="IMDB DPO",
-    prefixes=prefixes,
-)
-args.base_learning_rate = 4e-6
-args.warmup_steps = 50
-args.dpo_beta = 0.2
 # %%
 if LOAD_PAIRS_DATASET:
     with open(LOAD_PAIRS_DATASET, "rb") as f:
