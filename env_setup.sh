@@ -1,6 +1,13 @@
 
 # Step 3: Install pyenv
-if ! command -v pyenv &>/dev/null; then
+if [ ! -d "$HOME/.pyenv" ] && ! command -v pyenv &>/dev/null; then
+    echo "Installing pyenv dependencies..."
+    # sudo apt update; sudo apt install build-essential libssl-dev \
+    # libbz2-dev libreadline-dev libsqlite3-dev \
+    # libncursesw5-dev tk-dev libxml2-dev libxmlsec1-dev
+    sudo apt update; sudo apt-get install -y build-essential libssl-dev zlib1g-dev \
+    libbz2-dev libreadline-dev libsqlite3-dev curl git \
+    libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev
     echo "Installing pyenv..."
     curl https://pyenv.run | bash
 
@@ -16,14 +23,13 @@ if ! command -v pyenv &>/dev/null; then
     echo 'export PATH="$PYENV_ROOT/bin:$HOME/.pyenv/shims:$PATH"' >> ~/.bashrc
     echo 'eval "$(pyenv init --path)"' >> ~/.bashrc
     echo 'eval "$(pyenv init -)"' >> ~/.bashrc
+    # Ensure python and python3 point to pyenv shim
+    export PATH="$HOME/.pyenv/shims:$PATH"
     echo "pyenv installed and added to shell configuration."
 else
     echo "pyenv is already installed."
 fi
 
-# Ensure python and python3 point to pyenv shim
-export PATH="$HOME/.pyenv/shims:$PATH"
-echo "Python commands redirected to pyenv shims."
 
 # Step 4: Determine Python version
 PYTHON_VERSION=""
@@ -61,8 +67,9 @@ if ! pyenv versions | grep -q "$PYTHON_VERSION"; then
 else
     echo "Python $PYTHON_VERSION is already installed."
 fi
-echo "Python executable: $(which python3)"
-exit 1
+echo "Python executable: "$(which python3)
+echo "Pip executable: "$(which pip)
+# exit 1
 # Step 6: Set local Python version if .python-version does not exist
 if [ ! -f ".python-version" ]; then
     pyenv local "$PYTHON_VERSION"
