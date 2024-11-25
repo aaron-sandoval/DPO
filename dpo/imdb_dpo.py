@@ -4,6 +4,7 @@ from pathlib import Path
 import pickle
 from datetime import datetime
 from typing import Optional
+from dataclasses import dataclass
 
 import wandb
 import torch as t
@@ -49,10 +50,11 @@ prefixes = [
     "This movie ",
     "Everyone says ",
 ]
+
 @dataclass
 class DPOIMDBTrainingArgs(DPOTrainingArgs):
-    eval_batches: int = 5
-    train_batches_per_eval: int = 10
+    # eval_batches: int = 1
+    train_batches_per_eval: int = 10  # Training batches before generating and evaluating metrics
 
 args = DPOIMDBTrainingArgs(
     base_model=BASE_MODEL,
@@ -149,6 +151,30 @@ class DPOIMDBTrainer:
         self.step = 0
         self.save_model = save_model
 
+    def evaluate_generation_sentiment(self):
+        """
+        Generate and judge a batch of generations from `self.model`.
+        """
+        generations, _ = self.model.generate(
+            self.dataloader.dataset.prompt, 
+            batch_size=self.args.batch_size, 
+            gen_len=self.args.gen_len,
+            temperature=self.args.temperature,
+        )
+        judgments = judge_sentiment(generations)
+        if self.args.use_wandb:
+            wandb.log({
+                "eval_sentiment": judgments,
+                "eval_sentiment_mean": judgments.mean().item(),
+            }, step=self.step)
+        else:
+            positive_count = t.sum(judgments > 0).item()
+            negative_count = t.sum(judgments <= 0).item()
+            # print(f"Positive judgments: {positive_count}/{self.args.eval_batches}")
+            # print(f"Negative judgments: {negative_count}/{self.args.eval_batches}")
+            print(f"Positive proportion: {positive_count / self.args.eval_batches}")
+        return judgments
+
     def dpo_loss(
             self, 
             logprobs_pref_trained: Float[Tensor, "batch gen_len"], 
@@ -172,7 +198,9 @@ class DPOIMDBTrainer:
         return loss
     
     def _train(self):
-        for batch in tqdm(self.dataloader):
+        for i, batch in tqdm(enumerate(self.dataloader)):
+            if i % self.args.train_batches_per_eval == 0:
+                self.evaluate_generation_sentiment()
             if self.args.use_wandb:
                 # _, gen_strings = self.model.generate(
                 #     self.dataloader.dataset.prompt, 
@@ -225,6 +253,7 @@ class DPOIMDBTrainer:
             self.optimizer.step()
             self.scheduler.step()
             self.step += 1
+        self.evaluate_generation_sentiment()
 
     def train(self):
         self.model.train()
@@ -253,3 +282,8 @@ trainer = DPOIMDBTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, args
 args.use_wandb = False
 trainer.train()
 # %%
+# Save to disk and/or Hugging Face
+# dpo_model.save_model()
+dpo_model.model.push_to_hub("gpt2-large-imdb-positive")
+# %%
+
