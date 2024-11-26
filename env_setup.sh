@@ -91,3 +91,7 @@ echo "Installing project dependencies using Poetry..."
 poetry install
 
 echo "Python environment setup complete."
+
+git config --global user.email "nope@nope.com"
+git config --global user.name "Nope"
+echo "Git configuration complete."
