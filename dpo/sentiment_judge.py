@@ -13,7 +13,7 @@ sentiment_analysis = pipeline(
     device=device,
 )
 
-def judge_sentiment(text: str | Sequence[str], device: str = "cpu") -> int | Float[t.Tensor, "N"]:
+def judge_sentiment(text: str | Sequence[str], device: str = "cpu") -> float | Float[t.Tensor, "N"]:
     if isinstance(text, str):
         judgment = sentiment_analysis(text)
         return (1 if judgment[0]["label"] == "POSITIVE" else -1) * judgment[0]["score"]
