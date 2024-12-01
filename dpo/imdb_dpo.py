@@ -54,7 +54,9 @@ prefixes = [
 @dataclass
 class DPOIMDBTrainingArgs(DPOTrainingArgs):
     # eval_batches: int = 1
-    train_batches_per_eval: int = 10  # Training batches before generating and evaluating metrics
+    train_batches_per_eval: int = 3  # Training batches before generating and evaluating metrics
+    epochs: int = 1
+
 
 args = DPOIMDBTrainingArgs(
     base_model=BASE_MODEL,
@@ -65,7 +67,7 @@ args = DPOIMDBTrainingArgs(
     exp_name="IMDB DPO",
     prefixes=prefixes,
     base_learning_rate=4e-6,
-    warmup_steps=50,
+    warmup_steps=2,
     dpo_beta=0.2,
 )
 # %%
@@ -155,8 +157,8 @@ class DPOIMDBTrainer:
         """
         Generate and judge a batch of generations from `self.model`.
         """
-        generations, _ = self.model.generate(
-            self.dataloader.dataset.prompt, 
+        _, generations = self.model.generate(
+            self.args.prefixes[0], 
             batch_size=self.args.batch_size, 
             gen_len=self.args.gen_len,
             temperature=self.args.temperature,
@@ -172,7 +174,8 @@ class DPOIMDBTrainer:
             negative_count = t.sum(judgments <= 0).item()
             # print(f"Positive judgments: {positive_count}/{self.args.eval_batches}")
             # print(f"Negative judgments: {negative_count}/{self.args.eval_batches}")
-            print(f"Positive proportion: {positive_count / self.args.eval_batches}")
+            print(f"Positive proportion: {positive_count / self.args.batch_size}")
+            print(f"Eval sentiment mean: {judgments.mean().item()}")
         return judgments
 
     def dpo_loss(
@@ -198,62 +201,51 @@ class DPOIMDBTrainer:
         return loss
     
     def _train(self):
-        for i, batch in tqdm(enumerate(self.dataloader)):
-            if i % self.args.train_batches_per_eval == 0:
-                self.evaluate_generation_sentiment()
-            if self.args.use_wandb:
-                # _, gen_strings = self.model.generate(
-                #     self.dataloader.dataset.prompt, 
-                #     batch_size=self.args.batch_size, 
-                #     gen_len=self.args.gen_len,
-                #     temperature=self.args.temperature,
-                # )
-                pref_strs: list[str] = [self.args.tokenizer.decode(ids) for ids in batch["preferred"]]
-                rej_strs: list[str] = [self.args.tokenizer.decode(ids) for ids in batch["rejected"]]
-                # gen_rewards = t.tensor([self.implicit_reward_fn(gen_str) for gen_str in pref_strs+rej_strs], dtype=t.float16, requires_grad=False)
-                avg_pref_reward: float = sum(self.implicit_reward_fn(pref_str) for pref_str in pref_strs) / len(pref_strs)
-                avg_rej_reward: float = sum(self.implicit_reward_fn(rej_str) for rej_str in rej_strs) / len(rej_strs)
-                print(pref_strs[0])
-                wandb.log({
-                    "reward": {
-                        "preferred": avg_pref_reward,
-                        "rejected": avg_rej_reward,
-                        # "mean": gen_rewards.mean().item(),
-                        # "all": gen_rewards,
-                    },
-                    "lr": self.scheduler.get_last_lr()[0],
-                }, step=self.step)
-            self.optimizer.zero_grad()
-            # Encode the preferred IDs
-            preferred_encoded_ids = [t.tensor(self.args.tokenizer.encode(s)) for s in batch["preferred"]]
+        for epoch in range(self.args.epochs):
+            for i, batch in tqdm(enumerate(self.dataloader), desc=f"Epoch {epoch+1}/{self.args.epochs}"):
+                if i % self.args.train_batches_per_eval == 0:
+                    self.evaluate_generation_sentiment()
+                if self.args.use_wandb:
+                    wandb.log({
+                        # "reward": {
+                            # "preferred": avg_pref_reward,
+                            # "rejected": avg_rej_reward,
+                            # "mean": gen_rewards.mean().item(),
+                            # "all": gen_rewards,
+                        # },
+                        "lr": self.scheduler.get_last_lr()[0],
+                    }, step=self.step)
+                self.optimizer.zero_grad()
+                # Encode the preferred IDs
+                preferred_encoded_ids = [t.tensor(self.args.tokenizer.encode(s)) for s in batch["preferred"]]
 
-            # Pad the sequences
-            preferred_padded_ids =  t.nn.utils.rnn.pad_sequence(preferred_encoded_ids, batch_first=True, padding_value=self.args.tokenizer.eos_token_id)
-            # Move the padded sequences to the device
-            preferred_ids = preferred_padded_ids.to(device)
-            
-            # Encode the rejected IDs
-            rejected_encoded_ids = [t.tensor(self.args.tokenizer.encode(s)) for s in batch["rejected"]]
-            rejected_padded_ids =  t.nn.utils.rnn.pad_sequence(rejected_encoded_ids, batch_first=True, padding_value=self.args.tokenizer.eos_token_id)
-            rejected_ids = rejected_padded_ids.to(device)
-            
-            prefix_lens = batch["prefix_len"]
-            # assert t.all(batch["prefix_len"] == prefix_lens)
-            preferred_logits = self.model(preferred_ids)
-            rejected_logits = self.model(rejected_ids)
-            preferred_logprobs = get_correct_token_logprobs_variable_prefix(preferred_logits, preferred_ids, gen_len=self.args.gen_len, prefix_len=prefix_lens)
-            rejected_logprobs = get_correct_token_logprobs_variable_prefix(rejected_logits, rejected_ids, gen_len=self.args.gen_len, prefix_len=prefix_lens)
-            with t.inference_mode():
-                preferred_ref_logits = self.ref_model(preferred_ids)
-                rejected_ref_logits = self.ref_model(rejected_ids)
-            preferred_ref_logprobs = get_correct_token_logprobs_variable_prefix(preferred_ref_logits, preferred_ids, gen_len=self.args.gen_len, prefix_len=prefix_lens)
-            rejected_ref_logprobs = get_correct_token_logprobs_variable_prefix(rejected_ref_logits, rejected_ids, gen_len=self.args.gen_len, prefix_len=prefix_lens)
-            loss = self.dpo_loss(preferred_logprobs, rejected_logprobs, preferred_ref_logprobs, rejected_ref_logprobs)
-            loss.backward()
-            self.optimizer.step()
-            self.scheduler.step()
-            self.step += 1
-        self.evaluate_generation_sentiment()
+                # Pad the sequences
+                preferred_padded_ids =  t.nn.utils.rnn.pad_sequence(preferred_encoded_ids, batch_first=True, padding_value=self.args.tokenizer.eos_token_id)
+                # Move the padded sequences to the device
+                preferred_ids = preferred_padded_ids.to(device)
+                
+                # Encode the rejected IDs
+                rejected_encoded_ids = [t.tensor(self.args.tokenizer.encode(s)) for s in batch["rejected"]]
+                rejected_padded_ids =  t.nn.utils.rnn.pad_sequence(rejected_encoded_ids, batch_first=True, padding_value=self.args.tokenizer.eos_token_id)
+                rejected_ids = rejected_padded_ids.to(device)
+                
+                prefix_lens = batch["prefix_len"]
+                # assert t.all(batch["prefix_len"] == prefix_lens)
+                preferred_logits = self.model(preferred_ids)
+                rejected_logits = self.model(rejected_ids)
+                preferred_logprobs = get_correct_token_logprobs_variable_prefix(preferred_logits, preferred_ids, gen_len=self.args.gen_len, prefix_len=prefix_lens)
+                rejected_logprobs = get_correct_token_logprobs_variable_prefix(rejected_logits, rejected_ids, gen_len=self.args.gen_len, prefix_len=prefix_lens)
+                with t.inference_mode():
+                    preferred_ref_logits = self.ref_model(preferred_ids)
+                    rejected_ref_logits = self.ref_model(rejected_ids)
+                preferred_ref_logprobs = get_correct_token_logprobs_variable_prefix(preferred_ref_logits, preferred_ids, gen_len=self.args.gen_len, prefix_len=prefix_lens)
+                rejected_ref_logprobs = get_correct_token_logprobs_variable_prefix(rejected_ref_logits, rejected_ids, gen_len=self.args.gen_len, prefix_len=prefix_lens)
+                loss = self.dpo_loss(preferred_logprobs, rejected_logprobs, preferred_ref_logprobs, rejected_ref_logprobs)
+                loss.backward()
+                self.optimizer.step()
+                self.scheduler.step()
+                self.step += 1
+            self.evaluate_generation_sentiment()
 
     def train(self):
         self.model.train()
@@ -279,7 +271,7 @@ class DPOIMDBTrainer:
 # %%
 trainer = DPOIMDBTrainer(model=dpo_model, dataloader=on_the_fly_dataloader, args=args, ref_model=ref_model)
 # %%
-args.use_wandb = False
+args.use_wandb = True
 trainer.train()
 # %%
 # Save to disk and/or Hugging Face
